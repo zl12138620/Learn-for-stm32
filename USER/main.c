@@ -24,7 +24,7 @@
 #define LED_PORT      GPIOB
 #define LED_PIN       GPIO_Pin_2
 
-/* ---------------- 有源蜂鸣器: BOOT1 = PB3 -------------- */
+/* ---------------- 有源蜂鸣器: BOOT1 = PB4 -------------- */
 #define FMQ_RCC_CLK   RCC_AHB1Periph_GPIOB
 #define FMQ_PORT      GPIOB
 #define FMQ_PIN       GPIO_Pin_4
@@ -47,7 +47,7 @@ int main(void)
   USER_FINDER_CONFIG();
   USER_FMQ_CONFIG();
   USER_LED_CONFIG();
-
+  // GPIO_WriteBit(LED_PORT, LED_PIN, Bit_SET);
 
 
 
@@ -57,12 +57,19 @@ int main(void)
       {
         Delay_ms(20);//延时判断防止误判
         if(GPIO_ReadInputDataBit(FINDER_PORT, FINDER_PIN) == Bit_RESET)
+        {
           GPIO_WriteBit(FMQ_PORT, FMQ_PIN, Bit_SET);
           GPIO_WriteBit(LED_PORT, LED_PIN, Bit_SET);
+        }
+          
       }
       else
+      {
           GPIO_WriteBit(FMQ_PORT, FMQ_PIN, Bit_RESET);
           GPIO_WriteBit(LED_PORT, LED_PIN, Bit_RESET);
+
+      }    
+          // GPIO_WriteBit(LED_PORT, LED_PIN, Bit_RESET);
   }
 }
 
@@ -95,7 +102,7 @@ static void USER_FINDER_CONFIG(void)
   GPIO_InitTypeDef GPIO_StructInit;
   GPIO_StructInit.GPIO_Mode = GPIO_Mode_IN;
   GPIO_StructInit.GPIO_Pin = FINDER_PIN;
-  GPIO_StructInit.GPIO_PuPd = GPIO_PuPd_DOWN;
+  GPIO_StructInit.GPIO_PuPd = GPIO_PuPd_UP;
   GPIO_Init(FINDER_PORT, &GPIO_StructInit);
 }
 
