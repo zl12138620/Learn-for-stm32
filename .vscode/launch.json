@@ -1,0 +1,37 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Cortex-Debug (OpenOCD / CMSIS-DAP 野火 FireDAP)",
+      "type": "cortex-debug",
+      "request": "launch",
+      "servertype": "openocd",
+      "configFiles": [
+        "interface/cmsis-dap.cfg",
+        "target/stm32f4x.cfg"
+      ],
+      "searchDir": [],
+      "serverArgs": ["-c", "adapter speed 1000"],
+      "interface": "swd",
+      "executable": "${workspaceFolder}/build/output/STM32F407VGT6.elf",
+      "cwd": "${workspaceFolder}",
+      "runToEntryPoint": "main",
+      "preLaunchTask": "build",
+      "device": "STM32F407VGT6",
+      "showDevDebugOutput": "parsed"
+    },
+    {
+      "name": "Cortex-Debug (pyOCD / CMSIS-DAP)",
+      "type": "cortex-debug",
+      "request": "launch",
+      "servertype": "pyocd",
+      "targetId": "stm32f407vg",
+      "executable": "${workspaceFolder}/build/output/STM32F407VGT6.elf",
+      "cwd": "${workspaceFolder}",
+      "runToEntryPoint": "main",
+      "preLaunchTask": "build",
+      "showDevDebugOutput": "parsed"
+    }
+  ]
+}
+

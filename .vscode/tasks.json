@@ -1,0 +1,47 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "cmake-configure",
+      "type": "shell",
+      "command": "cmake -S . -B build -G Ninja",
+      "options": { "cwd": "${workspaceFolder}" },
+      "detail": "首次配置或改动 CMakeLists 后执行 (生成 build/ 目录)"
+    },
+    {
+      "label": "build",
+      "type": "shell",
+      "command": "cmake --build build",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": { "kind": "build", "isDefault": true },
+      "dependsOn": ["cmake-configure"],
+      "dependsOrder": "sequence",
+      "detail": "先确保 build/ 已配置，再编译并链接，产物位于 build/output/"
+    },
+    {
+      "label": "clean",
+      "type": "shell",
+      "command": "cmake --build build --target clean",
+      "options": { "cwd": "${workspaceFolder}" },
+      "detail": "清理 build 产物"
+    },
+    {
+      "label": "flash-openocd-dap",
+      "type": "shell",
+      "command": "openocd -f interface/cmsis-dap.cfg -f target/stm32f4x.cfg -c \"program build/output/STM32F407VGT6.hex verify reset exit\"",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "problemMatcher": [],
+      "detail": "通过 CMSIS-DAP (野火 FireDAP) + OpenOCD 烧录 .hex"
+    },
+    {
+      "label": "flash-pyocd",
+      "type": "shell",
+      "command": "pyocd flash -t stm32f407vg build/output/STM32F407VGT6.hex --reset",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "problemMatcher": [],
+      "detail": "通过 pyOCD (CMSIS-DAP) 烧录 .hex"
+    }
+  ]
+}

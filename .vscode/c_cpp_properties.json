@@ -1,0 +1,24 @@
+{
+  "configurations": [
+    {
+      "name": "STM32F407VGT6 (GCC)",
+      "includePath": [
+        "${workspaceFolder}/USER",
+        "${workspaceFolder}/System",
+        "${workspaceFolder}/SoftWare/inc",
+        "${workspaceFolder}/STM32F4xx_DSP_StdPeriph_Lib_V1.9.0/Libraries/CMSIS/Include",
+        "${workspaceFolder}/STM32F4xx_DSP_StdPeriph_Lib_V1.9.0/Libraries/STM32F4xx_StdPeriph_Driver/inc"
+      ],
+      "defines": [
+        "STM32F40_41xxx",
+        "USE_STDPERIPH_DRIVER",
+        "__FPU_PRESENT=1"
+      ],
+      "compilerPath": "arm-none-eabi-gcc",
+      "cStandard": "c11",
+      "intelliSenseMode": "gcc-arm",
+      "configurationProvider": "ms-vscode.cmake-tools"
+    }
+  ],
+  "version": 4
+}

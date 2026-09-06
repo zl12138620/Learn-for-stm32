@@ -1,0 +1,12 @@
+# CMake 构建产物
+build/
+build-*/
+
+# 临时日志
+*.log
+
+# 本地资料与可重新下载的工具包(不纳入仓库)
+资料/
+tools/*.vsix
+pyocd/*.pack
+
