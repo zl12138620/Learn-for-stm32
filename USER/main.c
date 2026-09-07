@@ -143,7 +143,5 @@ void Usart_SendString(USART_TypeDef* USARTx,uint8_t *data,uint32_t dataLen)
     USART_SendData(USARTx,data[i]);//发送数据
   }
   while (USART_GetFlagStatus(USARTx, USART_FLAG_TC) == RESET);
-
-  
 }
 
