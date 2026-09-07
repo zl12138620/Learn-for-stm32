@@ -20,11 +20,16 @@
 
 static void Delay_ms(uint32_t ms);
 static void USER_LED_CONFIG(void);
+static uint8_t RB_SelfTest(void);          /* 环形缓冲 API 自检, 返回 0=全部通过 */
+
+/* USART1 接收环形缓冲实例(见 main.h extern; 中断在 stm32f4xx_it.c 里写入) */
+RingBuf_t   g_uart1_rx;
+uint8_t     g_uart1_rx_mem[UART1_RX_BUF_SIZE];
 
   
 void USART1_IO_Conf(void);//配置串口的IO
 void USART1_Conf(uint32_t baud);//配置函数，定义一个形参用于配置波特率
-void Usart_SendString(USART_TypeDef* USARTx,uint8_t *data,uint32_t dataLen);
+void Usart_SendString(USART_TypeDef* USARTx,const uint8_t *data,uint32_t dataLen);
 
 
 
@@ -36,13 +41,49 @@ int main(void)
   
   USART1_Conf(9600);//配置波特率: 串口助手必须选择相同的波特率(这里是 9600)
   
-  // uint8_t data[] = {1,2,3,4,5};//注意: 要加 [ ] 才是数组; 原写法 data 只是单个 uint8_t(=1),
-  //                             //被当指针用后会越界读到地址 0x1~0x5 的随机内容
+  /* ---- 环形缓冲初始化 + 开启 USART1 接收中断 ---- */
+  RingBuf_Init(&g_uart1_rx, g_uart1_rx_mem, sizeof(g_uart1_rx_mem));
+  USART_ITConfig(USART1, USART_IT_RXNE, ENABLE); /* 每收到 1 字节触发 RXNE */
+  NVIC_EnableIRQ(USART1_IRQn);                    /* 使能 USART1 中断通道 */
+
+  /* ---- 测试一: 环形缓冲 API 自检(预期串口打印 RB_SELFTEST: PASS) ---- */
+  {
+    uint8_t err = RB_SelfTest();
+
+    if (err != 0U)
+    {
+      uint8_t num[2];
+
+      Usart_SendString(USART1, (const uint8_t *)"RB_SELFTEST: FAIL err=",
+                       sizeof("RB_SELFTEST: FAIL err=") - 1U);
+      num[0] = (uint8_t)('0' + (err / 10U));   /* 出错步号(<=20)按十进制两位发出 */
+      num[1] = (uint8_t)('0' + (err % 10U));
+      Usart_SendString(USART1, num, 2U);
+      Usart_SendString(USART1, (const uint8_t *)"\r\n", 2U);
+    }
+    else
+    {
+      Usart_SendString(USART1, (const uint8_t *)"RB_SELFTEST: PASS\r\n",
+                       sizeof("RB_SELFTEST: PASS\r\n") - 1U);
+    }
+  }
+
+  /* ---- 测试二: 回显。串口助手发什么, 预期原样收到什么 ---- */
+  Usart_SendString(USART1, (const uint8_t *)"RB Echo ready, send anything...\r\n",
+                   sizeof("RB Echo ready, send anything...\r\n") - 1U);
 
   while (1)
   {
-    Usart_SendString(USART1, "hello", 5);//发送字符串
-    Delay_ms(1000);
+    uint8_t ch;
+
+    if (RingBuf_ReadByte(&g_uart1_rx, &ch))
+    {
+      Usart_SendString(USART1, &ch, 1U);   /* 从环形缓冲取出并原样回显 */
+    }
+    else
+    {
+      Delay_ms(1U);                        /* 无数据时休息 1ms(降低轮询占用) */
+    }
   }
 }
 
@@ -64,6 +105,126 @@ static void USER_LED_CONFIG(void)
   GPIO_Init(LED_PORT, &GPIO_StructInit);
 }
 
+
+/** 
+  * ========================================================================
+  * 环形缓冲功能自检(测试一)
+  *   用一个 8 字节小环(容量=7)逐条验证 API, 全部通过返回 0;
+  *   任何一步失败返回该步骤号, main 会把它打印成 RB_SELFTEST: FAIL err=xx
+  * ========================================================================
+  */
+static uint8_t RB_SelfTest(void)
+{
+  static uint8_t mem[8];
+  RingBuf_t rb;
+  uint8_t   ch;
+  uint8_t   i;
+
+  /* ① 初始化 + 空/满初始状态 */
+  if (!RingBuf_Init(&rb, mem, sizeof(mem)))
+  {
+    return 1U;
+  }
+  if (!RingBuf_IsEmpty(&rb))
+  {
+    return 2U;
+  }
+  if (RingBuf_Peek(&rb, &ch))            /* 空缓冲 Peek 应失败 */
+  {
+    return 3U;
+  }
+  if (RingBuf_Free(&rb) != (sizeof(mem) - 1U))
+  {
+    return 4U;
+  }
+
+  /* ② 写满 7 字节(A~G), 之后应判满 */
+  for (i = 0U; i < 7U; i++)
+  {
+    if (!RingBuf_WriteByte(&rb, (uint8_t)('A' + i)))
+    {
+      return 5U;
+    }
+  }
+  if (!RingBuf_IsFull(&rb))
+  {
+    return 6U;
+  }
+  if (RingBuf_Used(&rb) != 7U)
+  {
+    return 7U;
+  }
+
+  /* ③ 写满后再写: 必须失败(满则丢弃, 绝不覆盖旧数据) */
+  if (RingBuf_WriteByte(&rb, 'X'))
+  {
+    return 8U;
+  }
+
+  /* ④ Peek: 查看队首 A 但不移除 */
+  if (!RingBuf_Peek(&rb, &ch) || (ch != 'A'))
+  {
+    return 9U;
+  }
+  if (RingBuf_Used(&rb) != 7U)           /* 仍应 7 字节 */
+  {
+    return 10U;
+  }
+
+  /* ⑤ 先读出 A B C */
+  for (i = 0U; i < 3U; i++)
+  {
+    if (!RingBuf_ReadByte(&rb, &ch) || (ch != (uint8_t)('A' + i)))
+    {
+      return 11U;
+    }
+  }
+
+  /* ⑥ 再写 a b c: 写指针发生"回绕"(绕回数组开头) */
+  for (i = 0U; i < 3U; i++)
+  {
+    if (!RingBuf_WriteByte(&rb, (uint8_t)('a' + i)))
+    {
+      return 12U;
+    }
+  }
+
+  /* ⑦ 连续读出到空, 顺序必须是 D E F G a b c(验证回绕后不乱序) */
+  {
+    static const uint8_t expect[7] = {'D', 'E', 'F', 'G', 'a', 'b', 'c'};
+
+    for (i = 0U; i < 7U; i++)
+    {
+      if (!RingBuf_ReadByte(&rb, &ch) || (ch != expect[i]))
+      {
+        return 13U;
+      }
+    }
+  }
+  if (!RingBuf_IsEmpty(&rb))
+  {
+    return 14U;
+  }
+
+  /* ⑧ Discard: 写 3 字节后丢弃前 2, 只剩最后一个 */
+  RingBuf_WriteByte(&rb, 0x11);
+  RingBuf_WriteByte(&rb, 0x22);
+  RingBuf_WriteByte(&rb, 0x33);
+  if (RingBuf_Discard(&rb, 2U) != 2U)
+  {
+    return 15U;
+  }
+  if (RingBuf_Used(&rb) != 1U)
+  {
+    return 16U;
+  }
+  if (!RingBuf_ReadByte(&rb, &ch) || (ch != 0x33))
+  {
+    return 17U;
+  }
+
+  return 0U;                             /* 全部通过 */
+}
 
 /**
   * @brief  轮询 SysTick 实现的毫秒延时(不依赖 SysTick 中断)
@@ -133,7 +294,7 @@ void USART1_Conf(uint32_t baud)//配置函数，定义一个形参用于配置�
   USART_Cmd(USART1,ENABLE);//开启串口1
 }
 
-void Usart_SendString(USART_TypeDef* USARTx,uint8_t *data,uint32_t dataLen)
+void Usart_SendString(USART_TypeDef* USARTx,const uint8_t *data,uint32_t dataLen)
 {
   uint32_t i;
   

@@ -160,6 +160,20 @@ void SysTick_Handler(void)
 }*/
 
 /**
+  * @brief  USART1 接收中断(RXNE): 把收到的 1 字节存入环形缓冲(生产者侧)
+  *         环形缓冲实例 g_uart1_rx 定义在 USER/main.c(main.h 有 extern),
+  *         主循环通过 RingBuf_ReadByte 取走(消费者侧)。
+  */
+void USART1_IRQHandler(void)
+{
+  if (USART_GetITStatus(USART1, USART_IT_RXNE) != RESET)
+  {
+    uint8_t ch = (uint8_t)USART_ReceiveData(USART1); /* 读 DR 会自动清 RXNE */
+    RingBuf_WriteByte(&g_uart1_rx, ch);              /* 缓冲满则自动丢弃该字节 */
+  }
+}
+
+/**
   * @}
   */ 
 
