@@ -99,9 +99,10 @@ pyocd list          # 输出里含 "CMSIS-DAP" 字样 = CMSIS-DAP 类调试器
   对应 `System/stm32f4xx.h` 的分支选择）。
 - 编译/链接：`-mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16`
   （启用硬件浮点）。
-- 时钟：`System/stm32f4xx.h` 中 `HSE_VALUE = 25MHz`（F407 分支默认），
-  `System/system_stm32f4xx.c` 按 25MHz 晶振把 SYSCLK 配置到 168MHz。
-  若开发板晶振不是 25MHz，请修改 `HSE_VALUE` 与 `PLL_M`（与 Keil 工程相同规则）。
+- 时钟：天空星 STM32F407VGT6 板载 HSE 晶振为 **8MHz**，已在
+  `System/stm32f4xx.h`（`HSE_VALUE = 8MHz`）与
+  `System/system_stm32f4xx.c`（`PLL_M = 8`）中改好，SYSCLK 仍配置到 168MHz。
+  若换用其它晶振频率的板子，请同步修改这两处（与 Keil 工程相同规则）。
 - StdPeriph 驱动为全量收集再剔除 F407 不支持的模块（DMA2D/LTDC/DSI/SAI/
   QSPI/SPDIFRX/FMC/FMPI2C/LPTIM/CEC/DFSDM），见 CMakeLists 中的 FILTER。
 

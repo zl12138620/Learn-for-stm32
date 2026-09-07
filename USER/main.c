@@ -1,17 +1,3 @@
-/**
-  ******************************************************************************
-  * @file    USER/main.c
-  * @brief   用户按键(SW2/WKUP/PA0) 控制 用户LED(LED2/PB2) 亮灭
-  *          板子  : 立创梁山派·天空星 (LCKFB-YZH V1.0, 2024-01-17)
-  *          芯片  : STM32F407VGT6 (与原理图引脚兼容)
-  *          原理图 : 资料/立创梁山派·天空星开发板原理图_2024-01-17.pdf
-  *                    - 第2页: SW2 用户(唤醒)按键 -> 网络 WKUP; LED2 用户LED -> 网络 PB2(BOOT1)
-  *                    - 第5页: PA0-WKUP(PA0) => PA0;  PB2-BOOT1(PB2) => PB2
-  *          电平   : PA0 经10k上拉到3V3, 按键按下接地 => 平时高, 按下低
-  *                    LED2 高边接 +3V3(经R29 2k), 低边到 PB2 => PB2=0 点亮
-  ******************************************************************************
-  */
-
 #include "main.h"
 
 /* ---------------- 用户按键: WKUP = PA0 ---------------- */
@@ -20,56 +6,43 @@
 #define KEY_PIN       GPIO_Pin_0
 
 /* ---------------- 用户 LED: BOOT1 = PB2 ---------------- */
-#define LED_RCC_CLK   RCC_AHB1Periph_GPIOB
-#define LED_PORT      GPIOB
-#define LED_PIN       GPIO_Pin_2
+#define LED_RCC_CLK   RCC_AHB1Periph_GPIOA
+#define LED_PORT      GPIOA
+#define LED_PIN       GPIO_Pin_7
 
-/* ---------------- 有源蜂鸣器: BOOT1 = PB4 -------------- */
-#define FMQ_RCC_CLK   RCC_AHB1Periph_GPIOB
-#define FMQ_PORT      GPIOB
-#define FMQ_PIN       GPIO_Pin_4
+/* ---------------- USART1 ---------------- */
+#define USART1_CLK      RCC_APB2Periph_USART1
+#define USART1_IO_CLK   RCC_AHB1Periph_GPIOA
+#define USART1_PORT     GPIOA
+#define USART1_RX_PIN   GPIO_Pin_9
+#define USART1_TX_PIN   GPIO_Pin_10
 
-/* ---------------- 循迹模块: BOOT1 = PA7 -------------- */
-#define FINDER_PORT     GPIOA
-#define FINDER_PIN      GPIO_Pin_7
-#define FINDER_RCC_CLK  RCC_AHB1Periph_GPIOA
 
 static void Delay_ms(uint32_t ms);
-static void USER_FINDER_CONFIG(void);
-static void USER_FMQ_CONFIG(void);
 static void USER_LED_CONFIG(void);
+
+  
+void USART1_IO_Conf(void);//配置串口的IO
+void USART1_Conf(uint32_t baud);//配置函数，定义一个形参用于配置波特率
+void Usart_SendString(USART_TypeDef* USARTx,uint8_t *data,uint32_t dataLen);
 
 
 
 
 int main(void)
 {
-  USER_FINDER_CONFIG();
-  USER_FMQ_CONFIG();
-  USER_LED_CONFIG();
-  // GPIO_WriteBit(LED_PORT, LED_PIN, Bit_SET);
 
-
+  USART1_IO_Conf();//配置串口的IO
+  
+  USART1_Conf(9600);//配置波特率: 串口助手必须选择相同的波特率(这里是 9600)
+  
+  // uint8_t data[] = {1,2,3,4,5};//注意: 要加 [ ] 才是数组; 原写法 data 只是单个 uint8_t(=1),
+  //                             //被当指针用后会越界读到地址 0x1~0x5 的随机内容
 
   while (1)
   {
-      if(GPIO_ReadInputDataBit(FINDER_PORT, FINDER_PIN) == Bit_RESET)
-      {
-        Delay_ms(20);//延时判断防止误判
-        if(GPIO_ReadInputDataBit(FINDER_PORT, FINDER_PIN) == Bit_RESET)
-        {
-          GPIO_WriteBit(FMQ_PORT, FMQ_PIN, Bit_SET);
-          GPIO_WriteBit(LED_PORT, LED_PIN, Bit_SET);
-        }
-          
-      }
-      else
-      {
-          GPIO_WriteBit(FMQ_PORT, FMQ_PIN, Bit_RESET);
-          GPIO_WriteBit(LED_PORT, LED_PIN, Bit_RESET);
-
-      }    
-          // GPIO_WriteBit(LED_PORT, LED_PIN, Bit_RESET);
+    Usart_SendString(USART1, "hello", 5);//发送字符串
+    Delay_ms(1000);
   }
 }
 
@@ -92,36 +65,6 @@ static void USER_LED_CONFIG(void)
 }
 
 
-
-/**
-  * @brief  循迹模块PA7
-  */
-static void USER_FINDER_CONFIG(void)
-{
-  RCC_AHB1PeriphClockCmd(FINDER_RCC_CLK, ENABLE);
-  GPIO_InitTypeDef GPIO_StructInit;
-  GPIO_StructInit.GPIO_Mode = GPIO_Mode_IN;
-  GPIO_StructInit.GPIO_Pin = FINDER_PIN;
-  GPIO_StructInit.GPIO_PuPd = GPIO_PuPd_UP;
-  GPIO_Init(FINDER_PORT, &GPIO_StructInit);
-}
-
-
-/**
-  * @brief 蜂鸣器配置PB3
-  */ 
-static void USER_FMQ_CONFIG(void)
-{
-    RCC_AHB1PeriphClockCmd(FMQ_RCC_CLK, ENABLE);
-    GPIO_InitTypeDef GPIO_StructInit;
-    GPIO_StructInit.GPIO_Mode = GPIO_Mode_OUT;
-    GPIO_StructInit.GPIO_OType = GPIO_OType_PP;
-    GPIO_StructInit.GPIO_Pin = FMQ_PIN;
-    GPIO_StructInit.GPIO_PuPd = GPIO_PuPd_NOPULL;
-    GPIO_StructInit.GPIO_Speed = GPIO_Speed_2MHz;
-    GPIO_Init(FMQ_PORT, &GPIO_StructInit);
-}
-
 /**
   * @brief  轮询 SysTick 实现的毫秒延时(不依赖 SysTick 中断)
   * @param  ms: 延时毫秒数
@@ -142,4 +85,65 @@ static void Delay_ms(uint32_t ms)
   SysTick->CTRL = 0;   /* 关闭 SysTick */
 }
 
+
+void USART1_IO_Conf(void)
+{
+  GPIO_InitTypeDef GPIO_InitStructure;	
+  
+  RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA,ENABLE);	
+  
+  GPIO_PinAFConfig(GPIOA,GPIO_PinSource9,GPIO_AF_USART1);//IO口用作串口引脚要配置复用模式
+  GPIO_PinAFConfig(GPIOA,GPIO_PinSource10,GPIO_AF_USART1);
+  
+  GPIO_StructInit(&GPIO_InitStructure);
+  GPIO_InitStructure.GPIO_Pin           = GPIO_Pin_9;//TX引脚
+  GPIO_InitStructure.GPIO_Mode          = GPIO_Mode_AF;//IO口用作串口引脚要配置复用模式
+  GPIO_InitStructure.GPIO_Speed         = GPIO_Speed_100MHz;
+  GPIO_InitStructure.GPIO_OType         = GPIO_OType_PP;
+  GPIO_InitStructure.GPIO_PuPd          = GPIO_PuPd_UP;
+  GPIO_Init(GPIOA,&GPIO_InitStructure);
+  
+  GPIO_StructInit(&GPIO_InitStructure);
+  GPIO_InitStructure.GPIO_Pin           = GPIO_Pin_10;//RX引脚
+  GPIO_InitStructure.GPIO_Mode          = GPIO_Mode_AF;
+  GPIO_InitStructure.GPIO_Speed         = GPIO_Speed_100MHz;
+  GPIO_InitStructure.GPIO_OType         = GPIO_OType_PP;
+  GPIO_InitStructure.GPIO_PuPd          = GPIO_PuPd_UP;
+  GPIO_Init(GPIOA,&GPIO_InitStructure);
+}
+
+
+void USART1_Conf(uint32_t baud)//配置函数，定义一个形参用于配置波特率
+{
+  USART_InitTypeDef USART_InitStructure;//定义配置串口的结构体变量
+  
+  
+  RCC_APB2PeriphClockCmd(RCC_APB2Periph_USART1, ENABLE);//开启串口1的时钟
+  
+  USART_DeInit(USART1);//大概意思是解除此串口的其他配置
+  
+  USART_StructInit(&USART_InitStructure);
+  USART_InitStructure.USART_BaudRate              = baud;//设置波特率
+  USART_InitStructure.USART_WordLength            = USART_WordLength_8b;//字节长度为8bit
+  USART_InitStructure.USART_StopBits              = USART_StopBits_1;//1个停止位
+  USART_InitStructure.USART_Parity                = USART_Parity_No ;//没有校验位
+  USART_InitStructure.USART_Mode                  = USART_Mode_Rx | USART_Mode_Tx;//将串口配置为收发模式
+  USART_InitStructure.USART_HardwareFlowControl   = USART_HardwareFlowControl_None; //不提供流控 
+  USART_Init(USART1,&USART_InitStructure);//将相关参数初始化给串口1
+  USART_Cmd(USART1,ENABLE);//开启串口1
+}
+
+void Usart_SendString(USART_TypeDef* USARTx,uint8_t *data,uint32_t dataLen)
+{
+  uint32_t i;
+  
+  for(i = 0;i < dataLen;i ++)
+  {
+    while (USART_GetFlagStatus(USARTx, USART_FLAG_TXE) == RESET);
+    USART_SendData(USARTx,data[i]);//发送数据
+  }
+  while (USART_GetFlagStatus(USARTx, USART_FLAG_TC) == RESET);
+
+  
+}
 
