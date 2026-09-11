@@ -10,7 +10,9 @@
         "interface/cmsis-dap.cfg",
         "target/stm32f4x.cfg"
       ],
-      "searchDir": [],
+      "searchDir": [
+        "E:/Project/Compiler/xpack-openocd-0.12.0-7/openocd/scripts"
+      ],
       "serverArgs": ["-c", "adapter speed 1000"],
       "interface": "swd",
       "executable": "${workspaceFolder}/build/output/STM32F407VGT6.elf",

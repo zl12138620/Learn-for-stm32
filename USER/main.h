@@ -25,6 +25,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "stm32f4xx.h"
 #include <stdbool.h>
+#include <string.h>
 #include "Ring_buffer.h"
 
 /* ============ USART1 接收环形缓冲(中断接收 -> 主循环读取) ============ */

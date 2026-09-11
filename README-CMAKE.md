@@ -202,6 +202,28 @@ void SysTick_Handler(void)
 `TimingDelay_Decrement()` 定义（参考 ST 模板 main.c 的 Delay 实现）。
 `USER/main.h` 保留声明不影响链接（无人调用即无引用）。
 
+### 9.4b `undefined reference to 'g_uart1_rx'`（USART1 接收环形缓冲未定义）
+**场景**：把 `USER/main.c` 改成纯串口发送 demo、或删掉接收相关代码后链接报此错。
+**原因**：`USER/main.h` 里 `extern RingBuf_t g_uart1_rx;`（注释指明定义在 `main.c`），
+`System/stm32f4xx_it.c` 的 `USART1_IRQHandler` 也调用 `RingBuf_WriteByte(&g_uart1_rx, ch)`；
+一旦 `main.c` 没定义这个全局实例，链接就找不到符号 → 链接失败 → ninja 会**删掉** `.elf`，
+于是 F5 的 preLaunchTask(build) 第一步就报 `File not found executable` → 无法 debug。
+**处理**（本工程已做，以后遇到照做即可）：在 `USER/main.c` 顶部（`#include "main.h"` 后）补上：
+```c
+RingBuf_t g_uart1_rx;
+uint8_t   g_uart1_rx_mem[UART1_RX_BUF_SIZE];
+```
+并在 `main()` 里初始化环 + 使能接收中断（若想禁用接收，则改为把 `USART1_IRQHandler` 清空，
+并删掉 `main.h` 里的两个 extern 声明）：
+```c
+RingBuf_Init(&g_uart1_rx, g_uart1_rx_mem, sizeof(g_uart1_rx_mem));
+USART_ITConfig(USART1, USART_IT_RXNE, ENABLE);
+NVIC_EnableIRQ(USART1_IRQn);
+```
+> 附带提醒：`USER/main.c` 里
+> `while (!USART_GetFlagStatus(USART1, USART_FLAG_TXE) == SET);` 这类写法因逻辑非优先级
+> 会立即通过、起不到等待作用，建议改为 `while (USART_GetFlagStatus(USART1, USART_FLAG_TXE) == RESET);`。
+
 ### 9.5 硬件链路自检（换电脑 / 换板 / 换调试器后先跑）
 ```powershell
 openocd -f interface/cmsis-dap.cfg -f target/stm32f4x.cfg `
