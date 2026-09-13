@@ -1,25 +1,37 @@
+#include "stm32f4xx.h"
 #include "OLED_Font.h"
-#include "OLED.h"
 
+/* 软件I2C时序延时。
+   F407@168MHz 下一条 GPIO_WriteBit 只有几十 ns, 而 SSD1306 要求
+   SCL 高/低电平 >= 0.6us、START/STOP 建立时间 >= 0.6us。不加延时
+   从机采样不到任何有效边沿 -> 屏幕一直黑。
+   若仍不稳定, 把 40 加大(如 80); 屏幕刷新变慢则减小。 */
+static void OLED_I2C_Delay(void)
+{
+	volatile uint32_t i = 40;	/* 约 1us @168MHz */
+	while (i--) { }
+}
 
 /*引脚配置*/
-#define OLED_W_SCL(x)		GPIO_WriteBit(GPIOB, GPIO_Pin_7, (BitAction)(x))
-#define OLED_W_SDA(x)		GPIO_WriteBit(GPIOB, GPIO_Pin_8, (BitAction)(x))
+#define OLED_W_SCL(x)		do { GPIO_WriteBit(GPIOB, GPIO_Pin_7, (BitAction)(x)); OLED_I2C_Delay(); } while (0)
+#define OLED_W_SDA(x)		do { GPIO_WriteBit(GPIOB, GPIO_Pin_8, (BitAction)(x)); OLED_I2C_Delay(); } while (0)
 
 /*引脚初始化*/
 void OLED_I2C_Init(void)
 {
-    // RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
+    // RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE);
+	
 	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE);
 	GPIO_InitTypeDef GPIO_InitStructure;
- 	// GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_OD;
-	GPIO_StructInit(&GPIO_InitStructure);
-	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_OUT;
+ 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_OUT;
 	GPIO_InitStructure.GPIO_OType = GPIO_OType_OD;
 	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_100MHz;
-	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_7 | GPIO_Pin_8;
-	GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_NOPULL;
+	GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_UP;
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_7;
  	GPIO_Init(GPIOB, &GPIO_InitStructure);
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_8;
+ 	GPIO_Init(GPIOB, &GPIO_InitStructure);
+
 	OLED_W_SCL(1);
 	OLED_W_SDA(1);
 }

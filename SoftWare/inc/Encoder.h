@@ -37,8 +37,8 @@ extern "C" {
 /* ============================ 引脚/参数配置 ============================ */
 #define ENC_GPIO_CLK        RCC_AHB1Periph_GPIOB   /* GPIOB 时钟 */
 #define ENC_GPIO_PORT       GPIOB                  /* 编码器挂在 GPIOB */
-#define ENC_A_PIN           GPIO_Pin_8             /* A 相 = PB8 */
-#define ENC_B_PIN           GPIO_Pin_7             /* B 相 = PB7 */
+#define ENC_A_PIN           GPIO_Pin_6             /* A 相 = PB8 */
+#define ENC_B_PIN           GPIO_Pin_5             /* B 相 = PB7 */
 
 /* EXTI 相关: A 相接 PB8 -> 线 8 属于 EXTI9_5 组 */
 #define ENC_EXTI_PORT_SRC   EXTI_PortSourceGPIOB

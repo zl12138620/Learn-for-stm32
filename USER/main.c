@@ -28,19 +28,13 @@ int main(void)
     USART_ITConfig(USART1, USART_IT_RXNE, ENABLE);
     NVIC_EnableIRQ(USART1_IRQn);
 
+    OLED_Init();
+    OLED_ShowString(1, 1, "nihao");   /* Line 1~4, Column 1~16 */
+
     while (1)
     {
-        uint8_t ch;
-        if (RingBuf_ReadByte(&g_uart1_rx, &ch))
-        {
-            Usart_SendString(USART1, &ch, 1U);   // 例如: 回显
-        }
-        else
-        {
-            Delay_ms(1U);                        // 没有数据时休息, 别空转烧 CPU
-        }
     }
-    
+
 }
 
 static void Delay_ms(uint32_t ms)
