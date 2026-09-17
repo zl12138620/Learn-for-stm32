@@ -1,35 +1,65 @@
 #include "stm32f4xx.h"
 #include "OLED_Font.h"
+#include "OLED.h"
 
-/* 软件I2C时序延时。
-   F407@168MHz 下一条 GPIO_WriteBit 只有几十 ns, 而 SSD1306 要求
-   SCL 高/低电平 >= 0.6us、START/STOP 建立时间 >= 0.6us。不加延时
-   从机采样不到任何有效边沿 -> 屏幕一直黑。
-   若仍不稳定, 把 40 加大(如 80); 屏幕刷新变慢则减小。 */
+
+
+
+/* 软件 I2C 时序延时, 单位是空转循环次数(约 0.7us/次 @168MHz)。
+   两个因素决定它该取多大:
+     1. SSD1315 要求 SCL 高/低电平 >= 0.6us、START/STOP 建立时间 >= 0.6us
+     2. 总线上拉电阻的充电时间 —— 上拉越弱, 需要的低电平时间越长
+
+   当前值 40(约 1us)对应"有 4.7k 上拉"的正常情况。
+   本工程目前总线上没有上拉电阻, 只靠 STM32 内部约 40k 的弱上拉,
+   必须把它调得很大才能给线容充电的时间 —— 这是权宜之计,
+   正解是接 4.7k 外部上拉电阻, 然后把这个值改回 40。 */
+#define OLED_I2C_DELAY_LOOPS   1000     /* 约 27us; 有 4.7k 上拉时改回 40 */
+
 static void OLED_I2C_Delay(void)
 {
-	volatile uint32_t i = 40;	/* 约 1us @168MHz */
+	volatile uint32_t i = OLED_I2C_DELAY_LOOPS;
 	while (i--) { }
 }
 
-/*引脚配置*/
-#define OLED_W_SCL(x)		do { GPIO_WriteBit(GPIOB, GPIO_Pin_7, (BitAction)(x)); OLED_I2C_Delay(); } while (0)
-#define OLED_W_SDA(x)		do { GPIO_WriteBit(GPIOB, GPIO_Pin_8, (BitAction)(x)); OLED_I2C_Delay(); } while (0)
+/* 毫秒级粗延时。
+   OLED.c 是独立模块, 用不了 main.c 里的 Delay_ms, 所以自带一个。
+   计数器加了 volatile: 原先那种 "for(i=0;i<1000;i++) for(j=0;j<1000;j++);"
+   的空循环在 -O2 下可能被编译器整个优化掉, 上电延时等于没生效。 */
+static void OLED_Delay_ms(uint32_t ms)
+{
+	while (ms--)
+	{
+		volatile uint32_t i = 40000;	/* 约 1ms @168MHz */
+		while (i--) { }
+	}
+}
 
-/*引脚初始化*/
+/*引脚配置
+  注意: 故意和硬件 I2C1 用同一对引脚(PB8=SCL, PB9=SDA, AF4),
+        这样两种实现能接同一组逻辑分析仪探头做时序对比。
+        I2C1 的映射是 PB6=SCL/PB7=SDA 或 PB8=SCL/PB9=SDA,
+        和"PB7=SCL/PB8=SDA"的角色正好相反, 所以必须统一到 PB8/PB9。 */
+#define OLED_W_SCL(x)		do { GPIO_WriteBit(GPIOB, GPIO_Pin_8, (BitAction)(x)); OLED_I2C_Delay(); } while (0)
+#define OLED_W_SDA(x)		do { GPIO_WriteBit(GPIOB, GPIO_Pin_9, (BitAction)(x)); OLED_I2C_Delay(); } while (0)
+
+/*引脚初始化
+  同时也是"切回软件 I2C 模式"的函数:
+  硬件 I2C1 跑完后调它, 把 PB8/PB9 从 AF4 复用改回普通开漏输出,
+  软件 I2C 才能重新接管这两个脚。 */
 void OLED_I2C_Init(void)
 {
     // RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE);
-	
+
 	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE);
 	GPIO_InitTypeDef GPIO_InitStructure;
  	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_OUT;
 	GPIO_InitStructure.GPIO_OType = GPIO_OType_OD;
 	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_100MHz;
 	GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_UP;
-	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_7;
- 	GPIO_Init(GPIOB, &GPIO_InitStructure);
 	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_8;
+ 	GPIO_Init(GPIOB, &GPIO_InitStructure);
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_9;
  	GPIO_Init(GPIOB, &GPIO_InitStructure);
 
 	OLED_W_SCL(1);
@@ -284,13 +314,12 @@ void OLED_ShowBinNum(uint8_t Line, uint8_t Column, uint32_t Number, uint8_t Leng
   */
 void OLED_Init(void)
 {
-	uint32_t i, j;
-	
-	for (i = 0; i < 1000; i++)			//上电延时
-	{
-		for (j = 0; j < 1000; j++);
-	}
-	
+	/* 上电延时。SSD1315 手册 §6.9.2 要求 VDD 稳定后至少等 20ms (t0)
+	   才能开始发命令; RES# 已接 3.3V(走芯片内部上电复位), 这里给 100ms 留足余量。
+	   旧写法 for(i=0;i<1000;i++) for(j=0;j<1000;j++); 的空循环有被 -O2 优化掉的风险,
+	   换成带 volatile 的 OLED_Delay_ms()。 */
+	OLED_Delay_ms(100);
+
 	OLED_I2C_Init();			//端口初始化
 	
 	OLED_WriteCommand(0xAE);	//关闭显示
@@ -322,14 +351,20 @@ void OLED_Init(void)
 	OLED_WriteCommand(0xDB);	//设置VCOMH取消选择级别
 	OLED_WriteCommand(0x30);
 
-	OLED_WriteCommand(0xA4);	//设置整个显示打开/关闭
+	OLED_WriteCommand(0xA4);	//设置整个显示打开/关闭(0xA4=按显存内容显示)
 
 	OLED_WriteCommand(0xA6);	//设置正常/倒转显示
 
+	/* 手册"Internal Charge Pump 命令表"Note(1): 充电泵必须按
+	   8Dh -> 14h -> AFh 的顺序使能, 三条命令紧挨着发, 中间不能插别的 */
 	OLED_WriteCommand(0x8D);	//设置充电泵
-	OLED_WriteCommand(0x14);
+	OLED_WriteCommand(0x14);	//14h=7.5V 使能充电泵
 
 	OLED_WriteCommand(0xAF);	//开启显示
-		
+
+	/* 手册 §6.9.2 第 5 条: 发完 AFh 后 SEG/COM 要等 100ms (t_AF) 才真正点亮。
+	   这期间写显存是允许的, 但要等它过去屏幕才看得见。 */
+	OLED_Delay_ms(100);
+
 	OLED_Clear();				//OLED清屏
 }

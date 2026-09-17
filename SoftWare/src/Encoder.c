@@ -5,13 +5,13 @@
   *
   *          工作流程:
   *
-  *            [A 相下降沿 -> EXTI8 中断]
+  *            [A 相下降沿 -> EXTI6 中断]
   *                 | 读 B 相: B=低 -> CCW++; B=高 -> CW++
-  *                 | 屏蔽 EXTI8(该格内不再响应)
+  *                 | 屏蔽 EXTI(该格内不再响应)
   *                 | 启动 TIM7 3ms 单次计数
   *                 v
   *            [TIM7 中断(3ms 到)]
-  *                 停 TIM7 -> 放开 EXTI8 -> 允许计下一格
+  *                 停 TIM7 -> 放开 EXTI -> 允许计下一格
   *
   *          好处: 抖动沿发生在“EXTI 屏蔽 + TIM 倒计时”窗口内被忽略;
   *                主循环不管多忙都不影响计次; 判定在边沿瞬间完成, 方向最准
@@ -35,16 +35,16 @@ void Encoder_Init(void)
   NVIC_InitTypeDef         NVIC_InitStructure;
   TIM_TimeBaseInitTypeDef  TIM_TimeBaseStructure;
 
-  /* ---- GPIO: PB7/PB8 输入 + 上拉(空闲高) ---- */
+  /* ---- GPIO: A/B 相 + SW 按键都配成上拉输入(空闲高) ---- */
   RCC_AHB1PeriphClockCmd(ENC_GPIO_CLK, ENABLE);
 
   GPIO_StructInit(&GPIO_InitStructure);
-  GPIO_InitStructure.GPIO_Pin  = ENC_A_PIN | ENC_B_PIN;
+  GPIO_InitStructure.GPIO_Pin  = ENC_A_PIN | ENC_B_PIN | ENC_SW_PIN;
   GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN;
   GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_UP;
   GPIO_Init(ENC_GPIO_PORT, &GPIO_InitStructure);
 
-  /* ---- EXTI: A 相(PB8) 下降沿触发 ---- */
+  /* ---- EXTI: A 相(PB6) 下降沿触发 ---- */
   RCC_APB2PeriphClockCmd(RCC_APB2Periph_SYSCFG, ENABLE);
   SYSCFG_EXTILineConfig(ENC_EXTI_PORT_SRC, ENC_EXTI_PIN_SRC);
 
@@ -87,7 +87,7 @@ void Encoder_Init(void)
 }
 
 /* ========================================================================
- * EXTI9_5 中断(实际只用了线 8): A 相下降沿 -> 判向 + 计次
+ * EXTI9_5 中断(实际只用了线 6): A 相下降沿 -> 判向 + 计次
  * 注意: EXTI 线 5~9 共用此中断函数; 若以后还用了其它 5~9 线,
  *       需要在这里一起判断对应的 EXTI_GetITStatus。
  * ====================================================================== */
