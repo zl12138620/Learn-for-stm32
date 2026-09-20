@@ -14,16 +14,13 @@ uint8_t   g_uart1_rx_mem[UART1_RX_BUF_SIZE];
 
 
 
-#define LED_PORT        GPIOB
-#define LED_RCC_CLK     RCC_AHB1Periph_GPIOB
-#define LED_PIN         GPIO_Pin_2
-
-
+/* LED(LED2/PB2) 已交给 LedPwm 模块接管 —— 软件 PWM 的中断在持续翻转这个脚,
+   这里不能再有第二个人写它(原 LED_Conf()/LED_PIN 宏因此移除)。 */
 
 static void USART_Conf(uint32_t baudrate);
 static void Delay_ms(uint32_t ms);
 static void USART_SendBytes(const uint8_t *data, uint32_t lenth);      /* 通用: 逐字节发送 */
-static void LED_Conf(void);
+static void App_SetAngle(uint8_t deg);        /* 设舵机角度 + 同步 LED 亮度(三条入口共用) */
 
 static void USART_SendUInt(uint8_t v);        /* 发送 0~255 的十进制(不带前导零) */
 static void CMD_Feed(uint8_t ch);             /* 逐字节喂给 AT 命令解析器 */
@@ -32,6 +29,7 @@ static void CMD_ReplyAngle(void);             /* 回复 "+ANGLE=<角度>" */
 static void CMD_ReplyError(void);             /* 回复 "ERROR" */
 static void ENC_ToServo(void);                /* 编码器转动 -> 舵机跟进 */
 static void SW_ToServo(void);                 /* 编码器轴按下 -> 舵机回中位 */
+
 
 /* ============ 编码器 -> 舵机 ============ */
 /* 每转一小格(一个定位点)舵机走 5°: 正转加、反转减, 撞到行程端点就停下。 */
@@ -71,19 +69,19 @@ int main(void)
     USART_ITConfig(USART1, USART_IT_RXNE, ENABLE);
     NVIC_EnableIRQ(USART1_IRQn);
 
-    LED_Conf();
-    GPIO_WriteBit(LED_PORT, LED_PIN, Bit_SET);   /* PB2 输出高 -> 点亮 LED2(阳极接 PB2, 阴极经 R29 到 GND) */
-
+    LedPwm_Init();                               /* PB2 + TIM4 软件 PWM, 默认 50% 亮度 */
     Servo_Init();                                /* PA1 + TIM5_CH2, 上电回中位 90° */
     Encoder_Init();                              /* PB6=A相 PB5=B相 PB0=SW + EXTI6 + TIM7 消抖 */
+
+    App_SetAngle(90U);                           /* 让 LED 亮度跟舵机初始角度对齐(90° -> 50%) */
 
     /* 开机横幅: 串口助手能收到这一行, 就证明"固件确实在跑"且"发送链路通"。
        没有它的话, 串口一片安静时无法区分是固件没跑、还是串口线接错 ——
        本工程 Encoder demo 时代就靠这招排障, 别删。 */
     static const char banner[] =
-        "SG90 ready: PA1/TIM5_CH2 50Hz, angle=90\r\n"
+        "SG90 + LED ready: servo=PA1/TIM5_CH2 50Hz, LED=PB2/TIM4 swPWM\r\n"
         "AT | AT+ANGLE=<0-180> | AT+ANGLE?   (end with CR LF)\r\n"
-        "Encoder: turn to nudge +-5deg, press SW to re-center\r\n";
+        "Encoder: +-5deg per detent, LED brightness follows. SW = re-center\r\n";
     USART_SendBytes((const uint8_t *)banner, sizeof(banner) - 1U);
 
     uint8_t rx_echo[UART1_RX_BUF_SIZE];          /* 回显用的中转缓冲 */
@@ -138,7 +136,7 @@ static void USART_IO_Conf(void)//串口IO初始化
     GPIO_InitStruct.GPIO_OType = GPIO_OType_PP;
     GPIO_InitStruct.GPIO_Pin = USART1_TX_PIN | USART1_RX_PIN;
     GPIO_InitStruct.GPIO_PuPd = GPIO_PuPd_UP;
-    GPIO_InitStruct.GPIO_Speed = GPIO_Speed_100MHz;
+    GPIO_InitStruct.GPIO_Speed = GPIO_Speed_2MHz;
     GPIO_Init(USART1_PORT, &GPIO_InitStruct);
 }
 
@@ -286,7 +284,7 @@ static void CMD_Execute(const char *line)
         }
 
         if (deg > 180U) { deg = 180U; }        /* 超范围夹紧, 不报错 */
-        Servo_SetAngle((uint8_t)deg);
+        App_SetAngle((uint8_t)deg);            /* 顺带把 LED 亮度也带过去 */
         CMD_ReplyAngle();
         return;
     }
@@ -370,7 +368,7 @@ static void ENC_ToServo(void)
     /* 已经在端点还继续往同方向转时角度不变, 那就别刷屏了 */
     if ((uint8_t)angle != Servo_GetAngle())
     {
-        Servo_SetAngle((uint8_t)angle);
+        App_SetAngle((uint8_t)angle);      /* 舵机和 LED 亮度一起走 */
         CMD_ReplyAngle();                  /* 回 "+ANGLE=<角度>", 便于核验 */
     }
 }
@@ -399,22 +397,20 @@ static void SW_ToServo(void)
 
     if (level == 0U)                       /* 确认按下 */
     {
-        Servo_SetAngle(90U);
+        App_SetAngle(90U);                 /* 舵机和 LED 一起回中位 */
         CMD_ReplyAngle();
     }
 }
 
-static void LED_Conf(void)
+/* 设定舵机角度, 同时让 LED 亮度跟着角度走(0°=灭, 180°=最亮)。
+   AT 命令 / 编码器 / SW 按键三条入口都走这里, 保证三者的亮度行为一致 ——
+   不这样做的话, 用 AT 设完角度再转编码器, LED 亮度就会和角度对不上。 */
+static void App_SetAngle(uint8_t deg)
 {
-    RCC_AHB1PeriphClockCmd(LED_RCC_CLK, ENABLE);
-    GPIO_InitTypeDef GPIO_InitStruct;
-    GPIO_InitStruct.GPIO_Mode = GPIO_Mode_OUT;
-    GPIO_InitStruct.GPIO_OType = GPIO_OType_PP;
-    GPIO_InitStruct.GPIO_Pin = LED_PIN;
-    GPIO_InitStruct.GPIO_PuPd = GPIO_PuPd_NOPULL;
-    GPIO_InitStruct.GPIO_Speed = GPIO_Speed_100MHz;
-    GPIO_Init(LED_PORT,&GPIO_InitStruct);
-    
+    Servo_SetAngle(deg);              /* 内部会把 deg 夹到 0~180 */
+
+    /* 用读回来的实际角度算亮度, 避免拿未夹紧的原始值去算 */
+    LedPwm_SetDuty((uint8_t)(((uint32_t)Servo_GetAngle() * 100U) / 180U));
 }   
 
 

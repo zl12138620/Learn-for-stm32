@@ -4,6 +4,8 @@
 # CMake cross toolchain file for STM32 (Cortex-M) with arm-none-eabi-gcc.
 # ==============================================================================
 
+
+
 # 裸机目标：无操作系统
 set(CMAKE_SYSTEM_NAME Generic)
 set(CMAKE_SYSTEM_PROCESSOR cortex-m4)
@@ -32,5 +34,5 @@ set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 
-# 统一使用 arm-none-eabi GCC 的开关（供需要切换编译器时使用）
-option(USE_ARMGCC "Use Arm GNU GCC toolchain (arm-none-eabi)" ON)
+
+
