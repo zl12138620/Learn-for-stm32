@@ -27,6 +27,8 @@
 #include <stdbool.h>
 #include <string.h>
 #include "Ring_buffer.h"
+#include "OLED.h"
+#include "LCD.h"
 
 /* ============ USART1 接收环形缓冲(中断接收 -> 主循环读取) ============ */
 #define UART1_RX_BUF_SIZE  64   /* 存储区 64 字节; 环形缓冲实际最多缓存 63 字节 */
