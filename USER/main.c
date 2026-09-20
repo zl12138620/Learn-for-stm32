@@ -21,8 +21,8 @@ uint8_t   g_uart1_rx_mem[UART1_RX_BUF_SIZE];
 static void LED_Conf(void);
 
 static void USART_Conf(uint32_t baudrate);
-static void Delay_ms(uint32_t ms);
 static void USART_SendBytes(const uint8_t *data, uint32_t lenth);      /* 通用: 逐字节发送 */
+static void USART_SendCamId(void);                                     /* 摄像头开机自检, 打一行 */
 
 int main(void)
 {
@@ -41,45 +41,69 @@ int main(void)
     LCD_Init();
     LCD_SelfTest();                 /* 边框 + 三色块 + 三行字: 换屏/换线后一眼验证 */
 
+    /* ---- OV7670 摄像头(带 FIFO) ---- */
+    OV7670_Init();
+    USART_SendCamId();              /* 开机报一次摄像头 ID, 见函数里的说明 */
+
     uint16_t hb = 0U;               /* 心跳计数 */
     while (1)
     {
         uint8_t ch;
 
-        if (RingBuf_ReadByte(&g_uart1_rx, &ch))
+        /* 先把串口攒下的字节回显掉(不阻塞, 有多少发多少) */
+        while (RingBuf_ReadByte(&g_uart1_rx, &ch))
         {
-            USART_SendBytes(&ch, 1U);            /* 回显 */
+            USART_SendBytes(&ch, 1U);
         }
-        else
-        {
-            Delay_ms(1U);                        /* 没有数据时休息, 别空转烧 CPU */
 
-            /* 心跳: 约每 500ms 翻转一次 LED2 */
-            if (++hb >= 500U)
-            {
-                hb = 0U;
-                GPIO_WriteBit(LED_PORT, LED_PIN,
-                              (GPIO_ReadOutputDataBit(LED_PORT, LED_PIN) == Bit_SET) ? Bit_RESET
-                                                                                     : Bit_SET);
-            }
+        /* ---- 抓一帧 -> 读出+旋转 -> DMA 送屏 ----
+           抓帧要等 VSYNC 对齐, 所以这一轮大约 50ms(约 20fps) */
+        OV7670_CaptureFrame();
+        OV7670_ReadFrameRotated();
+        LCD_DrawImage(4U, 0U, CAM_ROT_W, CAM_ROT_H, OV7670_GetFrameBuf());
+
+        /* 心跳: 约每 10 帧(半秒)翻转一次 LED2 */
+        if (++hb >= 10U)
+        {
+            hb = 0U;
+            GPIO_WriteBit(LED_PORT, LED_PIN,
+                          (GPIO_ReadOutputDataBit(LED_PORT, LED_PIN) == Bit_SET) ? Bit_RESET
+                                                                                 : Bit_SET);
         }
     }
 }
 
-static void Delay_ms(uint32_t ms)
+/* 开机读一次 OV7670 的 PID(0x0A)/VER(0x0B), 正常值应是 0x76 / 0x73。
+   **这是接好线之后第一个该看的东西**: 读得到 -> SCCB 通了(接线/供电/上拉都没问题),
+   后面出问题就都在 FIFO 那边; 读不到 -> 先查 SIO_C / SIO_D。
+   摄像头调通之后这一整段可以删掉。 */
+static void USART_SendCamId(void)
 {
-  uint32_t reload = SystemCoreClock / 1000U - 1U;   /* ① 1ms 的装载值 = 167999 */
+    static const char HEXD[] = "0123456789ABCDEF";
+    static const char OK[]   = "CAM OK   PID=0x";
+    static const char BAD[]  = "CAM FAIL PID=0x";
+    uint8_t  pid = OV7670_ReadReg(0x0A);
+    uint8_t  ver = OV7670_ReadReg(0x0B);
+    const char *p = (pid == 0x76U) ? OK : BAD;
+    uint8_t  buf[32];
+    uint8_t  n = 0U;
 
-  while (ms--)                                     /* ② 重复 ms 次 */
-  {
-    SysTick->LOAD = reload;                        /* ③ 装好 1ms */
-    SysTick->VAL  = 0;                             /* ④ 清计数和 COUNTFLAG(关键!) */
-    SysTick->CTRL = SysTick_CTRL_CLKSOURCE_Msk | SysTick_CTRL_ENABLE_Msk; /* ⑤ 开跑(无中断) */
-    while ((SysTick->CTRL & SysTick_CTRL_COUNTFLAG_Msk) == 0)  /* ⑥ 忙等约 1ms */
-    {
-    }
-  }
-  SysTick->CTRL = 0;                               /* ⑦ 用完关闭, 归还 SysTick */
+    while (*p != '\0') { buf[n++] = (uint8_t)(*p++); }
+
+    buf[n++] = (uint8_t)HEXD[(pid >> 4) & 0x0FU];
+    buf[n++] = (uint8_t)HEXD[pid & 0x0FU];
+    buf[n++] = (uint8_t)' ';
+    buf[n++] = (uint8_t)'V';
+    buf[n++] = (uint8_t)'R';
+    buf[n++] = (uint8_t)'=';
+    buf[n++] = (uint8_t)'0';
+    buf[n++] = (uint8_t)'x';
+    buf[n++] = (uint8_t)HEXD[(ver >> 4) & 0x0FU];
+    buf[n++] = (uint8_t)HEXD[ver & 0x0FU];
+    buf[n++] = (uint8_t)'\r';
+    buf[n++] = (uint8_t)'\n';
+
+    USART_SendBytes(buf, n);
 }
 
 static void USART_IO_Conf(void)//串口IO初始化

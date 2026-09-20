@@ -57,6 +57,10 @@ void LCD_Init(void);                                     /* 复位 + 初始化�
 
 void LCD_Clear(uint16_t color);                          /* 整屏填充 */
 void LCD_Fill(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color);
+
+/* 推一整块 RGB565 图像。buf 行优先: buf[y * w + x] 对应屏幕上的 (x, y)。
+   走 DMA(源地址自增), CPU 不参与搬运。一块最多 65535 个像素(DMA 计数器 16 位)。 */
+void LCD_DrawImage(uint16_t x, uint16_t y, uint16_t w, uint16_t h, const uint16_t *buf);
 void LCD_DrawPoint(uint16_t x, uint16_t y, uint16_t color);
 void LCD_DrawRect(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                   uint16_t color, uint8_t filled);

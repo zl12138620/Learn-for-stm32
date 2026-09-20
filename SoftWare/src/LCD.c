@@ -140,20 +140,24 @@ static void SPI_WriteHalf(uint16_t d)
    不需要为整屏准备 40KB 缓冲区。 */
 static uint16_t s_dma_color = 0U;
 
-static void LCD_DmaInit(void)
+/* 重配 DMA: 源地址 + 源地址是否自增。两种用途共用同一个 DMA 流:
+     纯色填充(如 LCD_Fill)  -> src = &s_dma_color, memInc = 0 (同一个值重复发)
+     推整块图像(如 LCD_DrawImage) -> src = 缓冲区首地址, memInc = 1 (**必须自增**)
+   所以每次传输前都按需重配一次。 */
+static void LCD_DmaConfig(const uint16_t *src, uint8_t memInc)
 {
 	DMA_InitTypeDef dma;
 
-	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_DMA1, ENABLE);
-	DMA_DeInit(LCD_DMA_STREAM);
+	DMA_Cmd(LCD_DMA_STREAM, DISABLE);
+	while (DMA_GetCmdStatus(LCD_DMA_STREAM) != DISABLE) { }
 
 	dma.DMA_Channel            = LCD_DMA_CHANNEL;
 	dma.DMA_PeripheralBaseAddr = (uint32_t)&(LCD_SPI->DR);
-	dma.DMA_Memory0BaseAddr    = (uint32_t)&s_dma_color;
+	dma.DMA_Memory0BaseAddr    = (uint32_t)src;
 	dma.DMA_DIR                = DMA_DIR_MemoryToPeripheral;
 	dma.DMA_BufferSize         = 1U;
 	dma.DMA_PeripheralInc      = DMA_PeripheralInc_Disable;
-	dma.DMA_MemoryInc          = DMA_MemoryInc_Disable;   /* ← 关键: 一直读同一地址 */
+	dma.DMA_MemoryInc          = (memInc != 0U) ? DMA_MemoryInc_Enable : DMA_MemoryInc_Disable;
 	dma.DMA_PeripheralDataSize = DMA_PeripheralDataSize_HalfWord;
 	dma.DMA_MemoryDataSize     = DMA_MemoryDataSize_HalfWord;
 	dma.DMA_Mode               = DMA_Mode_Normal;
@@ -163,6 +167,13 @@ static void LCD_DmaInit(void)
 	dma.DMA_MemoryBurst        = DMA_MemoryBurst_Single;
 	dma.DMA_PeripheralBurst    = DMA_PeripheralBurst_Single;
 	DMA_Init(LCD_DMA_STREAM, &dma);
+}
+
+static void LCD_DmaInit(void)
+{
+	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_DMA1, ENABLE);
+	DMA_DeInit(LCD_DMA_STREAM);
+	LCD_DmaConfig(&s_dma_color, 0U);
 }
 
 /* 用 DMA 把 s_dma_color 连发 pixels 次。返回时数据已全部交给 SPI。
@@ -422,6 +433,7 @@ void LCD_Fill(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color)
 	   CPU 在整个传输期间不用管一个字节 —— 现在这里为了流程清楚还是等它
 	   传完, 想并行就把 LCD_DmaSend 里的等待挪走、用 DMA 传输完成中断收尾。 */
 	s_dma_color = color;
+	LCD_DmaConfig(&s_dma_color, 0U);    /* 源地址固定, 不自增 */
 	LCD_DmaSend(n);
 
 	LCD_PixelWriteEnd();
@@ -430,6 +442,28 @@ void LCD_Fill(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color)
 void LCD_Clear(uint16_t color)
 {
 	LCD_Fill(0U, 0U, LCD_W, LCD_H, color);
+}
+
+/* 把一整块 RGB565 图像推上屏。
+   buf 按行优先存放: buf[y * w + x] 就是 (x, y) 那个像素。
+   和 LCD_Fill 的区别只有一个: **DMA 的源地址要自增**(每发一个像素往后挪一格)。 */
+void LCD_DrawImage(uint16_t x, uint16_t y, uint16_t w, uint16_t h, const uint16_t *buf)
+{
+	uint32_t n;
+
+	if ((buf == 0) || (x >= LCD_W) || (y >= LCD_H) || (w == 0U) || (h == 0U)) { return; }
+	if ((uint32_t)x + w > LCD_W) { w = (uint16_t)(LCD_W - x); }
+	if ((uint32_t)y + h > LCD_H) { h = (uint16_t)(LCD_H - y); }
+
+	n = (uint32_t)w * (uint32_t)h;
+	if (n > 65535U) { return; }         /* DMA 计数器是 16 位 */
+
+	LCD_PixelWriteBegin(x, y, w, h);
+
+	LCD_DmaConfig(buf, 1U);             /* 源地址自增 -> 逐像素搬 */
+	LCD_DmaSend(n);
+
+	LCD_PixelWriteEnd();
 }
 
 void LCD_DrawPoint(uint16_t x, uint16_t y, uint16_t color)
