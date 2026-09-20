@@ -325,6 +325,12 @@ void LCD_Init(void)
 	/* ---- DMA: 整片纯色填充交给它, CPU 不用一个字节一个字节地喂 ---- */
 	LCD_DmaInit();
 
+	/* ⚠ 光配好 DMA 还不够, 必须同时在 SPI 侧打开 TX 的 DMA 请求(CR2 的
+	   TXDMAEN 位)。少了这一行, SPI 永远不会向 DMA 发请求 -> DMA 一次都
+	   搬不动 -> LCD_DmaSend 里等 TC 标志的那个 while 死等, 现象是固件
+	   整个卡死在 LCD_SelfTest 里, LED 心跳停、串口失联。 */
+	SPI_I2S_DMACmd(LCD_SPI, SPI_I2S_DMAReq_Tx, ENABLE);
+
 	/* ---- 硬件复位: 手册要求 RESET 低电平至少保持 10us ---- */
 	GPIO_ResetBits(LCD_RST_PORT, LCD_RST_PIN);
 	LCD_Delay_ms(20U);
@@ -358,7 +364,22 @@ void LCD_Init(void)
 
 	LCD_Cmd(0x20);                              /* 关闭反显(InverOff) */
 
-	LCD_Cmd1(0x36, 0xC8);                       /* 扫描方向: MY=1 MX=1 RGB=1 */
+	/* 扫描方向 + 颜色顺序(MADCTL):
+	     bit7 MY  行方向: 0=正常 1=上下翻转
+	     bit6 MX  列方向: 0=正常 1=左右镜像
+	     bit3 RGB 颜色顺序: 0=RGB 1=BGR
+	   ⚠ 这块 1.8 寸屏实测要用 0xC0(MY=1 MX=1 RGB=0)。
+
+	   ⚠⚠ 排查方向时最容易搞混的一点: **色块全是矩形, 镜像只改变它的位置、
+	   不改变它的样子**。所以"左到右是蓝绿红"这句话, 两种完全不同的原因
+	   都会产生:
+	     位置镜像(MX)   -> 蓝绿红, 而且**文字也是反的**
+	     红蓝互换(RGB)  -> 蓝绿红, 但**文字是正常的**
+	   **唯一能分辨的是文字**:
+	     文字镜像  -> 改 MX(bit6)
+	     文字正常  -> 改 RGB(bit3)
+	   只看色块顺序就下手, 会像我一样改错位、来回绕好几轮。 */
+	LCD_Cmd1(0x36, 0xC0);                       /* MY=1 MX=1 RGB=0 */
 	LCD_Cmd1(0x3A, 0x05);                       /* 像素格式: 16bit RGB565 */
 
 	/* ---- 伽马校正 ---- */
@@ -373,10 +394,6 @@ void LCD_Init(void)
 	LCD_Cmd(0x29);                              /* 开显示 */
 	LCD_Delay_ms(50U);
 }
-
-/* ======================= 排障接口 ======================= */
-uint16_t LCD_SpiCR1(void) { return LCD_SPI->CR1; }
-uint16_t LCD_SpiSR(void)  { return LCD_SPI->SR;  }
 
 /* 运行时改扫描方向和显存偏移(排障用)。
    madctl: MADCTL(0x36) 的值; colOff/rowOff: 显存列/行偏移。
@@ -439,7 +456,7 @@ void LCD_DrawRect(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
 /* 字库是 8x16: 每个字符 16 字节, 前 8 字节上半部分, 后 8 字节下半部分 */
 void LCD_ShowChar(uint16_t x, uint16_t y, char ch, uint16_t fg, uint16_t bg)
 {
-	uint8_t i, j, bits;
+	uint8_t col, row;
 	uint8_t idx;
 
 	if ((ch < ' ') || (ch > '~')) { ch = '?'; }     /* 字库只覆盖可见 ASCII */
@@ -449,14 +466,22 @@ void LCD_ShowChar(uint16_t x, uint16_t y, char ch, uint16_t fg, uint16_t bg)
 
 	LCD_PixelWriteBegin(x, y, 8U, 16U);
 
-	for (i = 0U; i < 16U; i++)
+	/* ⚠ 这张字库的两个坑, 都踩过:
+	   1) 它是**按列**存的, 不是按行 —— 一个字节 = 一列的 8 个像素。当成
+	      "一个字节 = 一行 8 个横向像素"去画, 每个字会被转置成乱码。
+	   2) 字节里** bit0 在最上面**, bit7 在最下面(SSD1306 的页结构就是这样,
+	      江科大那套 OLED 驱动一次写一个字节正好对应一整列, 所以字库按它存)。
+	      把 bit7 当第一行, 每个字会上下颠倒 —— 而且 g/p/y 这些带下伸部的
+	      字母和下划线会被翻到上面去, 看着像"显示不全"。
+	   验证方法: 把 '_' 画出来, 应该在**最后一行**而不是中间。
+	   结构: [0..7]  上半部分, 一个字节一列
+	         [8..15] 下半部分, 同样一个字节一列 */
+	for (row = 0U; row < 16U; row++)
 	{
-		bits = OLED_F8x16[idx][i];
-		for (j = 0U; j < 8U; j++)
+		for (col = 0U; col < 8U; col++)
 		{
-			/* 字库里 1 = 点亮, 0 = 背景 */
-			uint16_t c = ((bits & 0x80U) != 0U) ? fg : bg;
-			bits = (uint8_t)(bits << 1);
+			uint8_t  b = OLED_F8x16[idx][(row < 8U) ? col : (uint8_t)(col + 8U)];
+			uint16_t c = ((b & (uint8_t)(0x01U << (row & 7U))) != 0U) ? fg : bg;
 			SPI_WriteHalf(c);           /* 16 位模式下一次写一个像素 */
 		}
 	}
@@ -511,7 +536,14 @@ void LCD_SelfTest(void)
 
 	LCD_DrawRect(0U, 0U, LCD_W, LCD_H, LCD_WHITE, 0U);      /* 整屏白边框 */
 
-	/* 三个色块, 一眼看出颜色顺序对不对 */
+	/* 方向指示块: 左上角黄、右下角青。
+	   矩形本身没有方向, 但**位置**有 —— 黄块跑到右上角 = 左右镜像,
+	   跑到左下角 = 上下颠倒。别小看这两块, 中间那三个色块是分不出
+	   "位置镜像"和"红蓝互换"的(两种原因产生的色块顺序一模一样)。 */
+	LCD_DrawRect(4U, 4U, 14U, 14U, LCD_YELLOW, 1U);
+	LCD_DrawRect(LCD_W - 18U, LCD_H - 18U, 14U, 14U, LCD_CYAN, 1U);
+
+	/* 三个色块: 红绿蓝。注意配合上面两块一起看 */
 	LCD_DrawRect(6U,  30U, 36U, 36U, LCD_RED,   1U);
 	LCD_DrawRect(46U, 30U, 36U, 36U, LCD_GREEN, 1U);
 	LCD_DrawRect(86U, 30U, 36U, 36U, LCD_BLUE,  1U);

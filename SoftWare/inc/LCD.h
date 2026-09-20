@@ -69,14 +69,6 @@ void LCD_ShowInt(uint16_t x, uint16_t y, int32_t v, uint16_t fg, uint16_t bg);
 /* 自检: 画边框 + 三色块 + 一行字, 用来一眼判断初始化对不对 */
 void LCD_SelfTest(void);
 
-/* 排障用: 读回 SPI2 的 CR1 / SR。
-   正常时 CR1 应含 SPE(0x0040, 使能) | MSTR(0x0004, 主机) |
-   SSM(0x0200) | SSI(0x0100) | BR(0x0008, 4 分频) —— 即 0x034C。
-   SR 的 bit8(0x0100) 是 MODF(主模式故障); 它一旦置位, MSTR 会被硬件清掉,
-   SPI 变成从机, 一个字节都发不出去。 */
-uint16_t LCD_SpiCR1(void);
-uint16_t LCD_SpiSR(void);
-
 /* 运行时改扫描方向 / 显存偏移(排障用)。
    madctl: 写进 0x36 的值; bit7=MY(行方向) bit6=MX(列方向) bit3=BGR。
            MY=1 -> 画面上下翻转; MX=1 -> 左右翻转。
