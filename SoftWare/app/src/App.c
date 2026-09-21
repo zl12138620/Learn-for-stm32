@@ -12,7 +12,51 @@
 #include "Encoder.h"
 #include "OV7670.h"
 #include "LCD.h"
+#include "Led.h"
 #include "Tick.h"
+
+#include "FreeRTOS.h"
+#include "task.h"
+
+/* ======================= 任务参数 ======================= */
+/* 栈的单位是**字(4 字节)**, 不是字节 —— 512 字 = 2KB。
+   给得宽松一点, 因为栈溢出的后果是"系统莫名卡死", 很难查;
+   configCHECK_FOR_STACK_OVERFLOW 会在溢出时立刻报出来, 但那是兜底。 */
+/* 栈的单位是**字(4 字节)**, 不是字节 —— 512 字 = 2KB。
+   两个画屏的任务给得宽一点: LCD 那套调用嵌得比较深, 而栈溢出的后果是
+   "系统莫名卡死"很难查。configCHECK_FOR_STACK_OVERFLOW 会立刻报出来,
+   但那是兜底, 不是省栈的理由。 */
+#define UI_TASK_STACK       512U
+#define UI_TASK_PRIO        (tskIDLE_PRIORITY + 4)
+
+#define CAM_TASK_STACK      512U
+#define CAM_TASK_PRIO       (tskIDLE_PRIORITY + 2)
+
+#define LED_TASK_STACK      192U
+#define LED_TASK_PRIO       (tskIDLE_PRIORITY + 1)
+
+/* UiTask 的轮询周期。编码器/按键都是**事件锁存**的(采样在 1ms 的 tick 钩子里,
+   见 Tick.c), 所以这里晚几毫秒不会漏按键, 只影响手感。
+   但**必须让出 CPU** —— prio 4 的任务若空转, 会把下面的 CameraTask(2) 和
+   LedTask(1) 一起饿死。这是任务拆分里最容易踩的一脚。 */
+#define UI_POLL_MS          5U
+
+/* UiTask 超过这么久没动静就认定它卡住了, LedTask 转成快闪报警 */
+#define UI_ALIVE_TIMEOUT_MS 1000U
+
+static void UiTask(void *arg);
+static void CameraTask(void *arg);
+static void LedTask(void *arg);
+
+/* CameraTask 的句柄: UiTask 靠任务通知唤醒它(界面切进/切出摄像头界面)。
+   CameraTask 不在摄像头界面时正阻塞在这个通知上, 零 CPU 占用。 */
+static TaskHandle_t s_cam_task = NULL;
+
+/* UiTask 的存活计数, 只增不减。LedTask 靠它判断 UiTask 还在不在。
+   ⚠ RTOS 里"灯在闪"不再等于"整个系统活着", 只等于 LedTask 自己还在跑 ——
+     要把这个判断显式做出来, 否则会白白丢掉一个很好用的故障指示。
+   volatile + 32 位单次读写 = 原子, 不需要加锁。 */
+static volatile uint32_t s_ui_alive = 0U;
 
 /* ======================= 临时诊断开关 =======================
    排查编码器接线用。开着时串口会多出:
@@ -39,11 +83,17 @@ typedef enum
 /* 编码器每转一小格, 舵机走多少度。一格 5° 的话 36 格走完全程 180°, 手感合适。 */
 #define SERVO_STEP_DEG  5
 
-static ui_screen_t s_screen = UI_MAIN_MENU;
-static uint8_t     s_sel    = 0U;       /* 主菜单当前选中项 */
-static uint8_t     s_angle  = 90U;      /* 舵机当前角度(上电回中位) */
+/* ---- 共享状态: 谁写谁读, 标在每条后面 ----
+   ⚠ s_screen 是**唯一**被两个任务碰到的东西(UiTask 写, CameraTask 读),
+     所以它必须是 volatile。单个 32 位字的读写是原子的, 不需要加锁;
+     真正需要小心的是"读了它之后要做什么", 那部分靠 LCD 互斥量兜
+     (见 Menu_DrawCameraFrameLocked 的注释)。 */
+static volatile ui_screen_t s_screen = UI_MAIN_MENU;   /* UiTask 写 / CameraTask 读 */
 
-/* 帧率统计: 数 1 秒窗口内抓到几帧 */
+static uint8_t     s_sel    = 0U;       /* 主菜单当前选中项 —— 只有 UiTask 碰 */
+static uint8_t     s_angle  = 90U;      /* 舵机当前角度(上电回中位) —— 只有 UiTask 碰 */
+
+/* 帧率统计: 数 1 秒窗口内抓到几帧 —— 只有 CameraTask 碰 */
 static uint32_t s_frames = 0U;
 static uint32_t s_fps_t0 = 0U;
 static uint8_t  s_fps    = 0U;
@@ -53,6 +103,7 @@ static void UI_Enter(ui_screen_t s);
 static void UI_MainMenu(int32_t delta, uint8_t pressed);
 static void UI_Servo(int32_t delta, uint8_t pressed);
 static void UI_Camera(uint8_t pressed);
+static void App_UiRun(void);
 static void App_SendCamId(void);
 
 #if (UI_DIAG != 0)
@@ -61,17 +112,157 @@ static void Diag_PrintLevels(void);
 
 /* ========================================================================
  * 开机
+ *
+ * ⚠ 这个函数在**调度器启动之前**被调用(main.c 里), 所以它只负责建任务,
+ *   不能有阻塞或依赖 tick 的操作 —— 那要放到任务里去。
  * ====================================================================== */
 void App_Init(void)
 {
-    App_SendCamId();                /* 横幅: 摄像头自检结果, 接好线后第一个该看的 */
-    UI_Enter(UI_MAIN_MENU);
+    /* ⚠ 互斥量必须在**建任务之前**创建 —— CameraTask 一起来就可能画屏 */
+    Menu_Init();
+
+    /* 建失败会调到 vApplicationMallocFailedHook(堆不够), 不会静默过去 */
+    (void)xTaskCreate(UiTask,     "Ui",  UI_TASK_STACK,  NULL, UI_TASK_PRIO,  NULL);
+    (void)xTaskCreate(CameraTask, "Cam", CAM_TASK_STACK, NULL, CAM_TASK_PRIO, &s_cam_task);
+    (void)xTaskCreate(LedTask,    "Led", LED_TASK_STACK, NULL, LED_TASK_PRIO, NULL);
 }
 
 /* ========================================================================
- * 主循环体
+ * UiTask —— 按键/编码器 → 状态机 → 菜单和舵机界面的绘制 + 串口回显
+ *
+ * 移植 FreeRTOS 的**全部收益**就在这个任务上: 以前整个超级循环被相机抓帧
+ * 占住, 按一下 SW 最多要等 95ms(等一帧 + 读 FIFO + 送屏)才被处理;
+ * 现在抓帧在 CameraTask 里, 这个任务独立跑, 按键几乎立刻响应。
  * ====================================================================== */
-void App_Run(void)
+static void UiTask(void *arg)
+{
+    (void)arg;
+
+    App_SendCamId();                /* 横幅: 摄像头自检结果, 接好线后第一个该看的 */
+    UI_Enter(UI_MAIN_MENU);
+
+    for (;;)
+    {
+        s_ui_alive++;               /* 给 LedTask 看的存活心跳(见 LedTask 注释) */
+
+        App_UiRun();
+
+        /* ⚠ 必须让出 CPU: 这个任务 prio 4, 空转会饿死 CameraTask(2) 和
+           LedTask(1)。5ms 的轮询周期对按键手感毫无影响 ——
+           按键本身是 1ms tick 钩子在采样并锁存的, 不会漏。
+           (真要再快点可以让编码器 EXTI 直接 xTaskNotifyGive 本任务,
+            那就是完全事件驱动了, 目前没必要。) */
+        vTaskDelay(pdMS_TO_TICKS(UI_POLL_MS));
+    }
+}
+
+/* ========================================================================
+ * CameraTask —— 只在摄像头界面时抓帧 + 送屏
+ *
+ * 不在摄像头界面时**阻塞在任务通知上, 零 CPU 占用**; UiTask 切换界面时
+ * 用 xTaskNotifyGive 把它叫醒(见 UI_Enter 末尾)。
+ * ====================================================================== */
+static void CameraTask(void *arg)
+{
+    (void)arg;
+
+    for (;;)
+    {
+        /* 不在摄像头界面: 挂起等通知。
+           (如果进来之前已经有挂起的通知, 这里会立刻返回, 所以下面要再判一次) */
+        if (s_screen != UI_CAMERA)
+        {
+            (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            continue;
+        }
+
+        /* 开机就没探到摄像头: 画面停在"无信号"不动, 别空转烧 CPU */
+        if (OV7670_IsPresent() == 0U)
+        {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        if (OV7670_CaptureFrame() == 0U) { continue; }
+
+        OV7670_ReadFrameRotated();
+
+        /* ⚠ 抓帧这 95ms 里用户可能已经退出摄像头界面了 —— 那就**不要画**,
+           否则会把相机画面盖到刚画好的菜单上, 而且没人会再重画菜单。
+           (这只是第一道闸; 真正保证正确性的是下面把判断放进锁里,
+            见 Menu_DrawCameraFrameLocked 的注释。) */
+        if (s_screen != UI_CAMERA) { continue; }
+
+        /* ---- 帧率: 数满 1 秒算一次 ---- */
+        s_frames++;
+        if (Tick_Elapsed(s_fps_t0, 1000U) != 0U)
+        {
+            s_fps    = (s_frames > 99U) ? 99U : (uint8_t)s_frames;
+            s_frames = 0U;
+            s_fps_t0 = Tick_GetMs();
+        }
+
+        /* ⚠ 判断和画**必须在同一个锁里** —— 锁外判断的话, 存在"判断完还在
+           摄像头界面、等拿到锁时已经切走了"的窗口, 那帧就会盖到菜单上。
+           详见 Menu.c 里这个函数的注释。 */
+        Menu_Lock();
+        if (s_screen == UI_CAMERA)
+        {
+            Menu_DrawCameraFrameLocked(OV7670_GetFrameBuf(), s_fps);
+        }
+        Menu_Unlock();
+    }
+}
+
+/* ========================================================================
+ * LedTask —— 心跳 + UiTask 存活监视
+ *
+ * ⚠ 语义上的一个变化, 值得单独说:
+ *     裸机时代"灯在闪"等于"主循环还活着", 因为翻转就发生在那个循环里。
+ *     进了 RTOS 之后, LedTask 是独立跑的 —— 即使 UiTask 卡死, 这个任务
+ *     照样每 500ms 翻一次灯, 那个故障指示就废了。
+ *
+ *   所以这里显式地把判断做出来: UiTask 每轮把 s_ui_alive 加一, LedTask
+ *   发现它超过 UI_ALIVE_TIMEOUT_MS 没涨, 就转成 100ms 的快闪报警 ——
+ *   和正常的 500ms 慢闪一眼就能区分开。
+ * ====================================================================== */
+static void LedTask(void *arg)
+{
+    uint32_t last_alive  = 0U;
+    uint32_t last_change = 0U;
+
+    (void)arg;
+
+    for (;;)
+    {
+        if (s_ui_alive != last_alive)
+        {
+            last_alive  = s_ui_alive;
+            last_change = Tick_GetMs();
+            Led_Heartbeat();                    /* 正常: 每 500ms 翻一次 */
+        }
+        else if (Tick_Elapsed(last_change, UI_ALIVE_TIMEOUT_MS) != 0U)
+        {
+            /* UiTask 卡住了 -> 快闪(100ms 周期), 和正常心跳区分开 */
+            Led_Force((uint8_t)((Tick_GetMs() / 100U) & 1U));
+        }
+        else
+        {
+            Led_Heartbeat();
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+/* ========================================================================
+ * UiTask 的一轮 —— 串口回显 + 取输入 + 按界面干活
+ *
+ * ⚠ 摄像头画面**不在这里画**了: 它跟着抓帧一起挪到了 CameraTask。
+ *   这个函数现在只剩菜单和舵机界面, 所以跑得很快 —— 这正是按键能立刻
+ *   响应的原因。
+ * ====================================================================== */
+static void App_UiRun(void)
 {
     uint8_t ch;
     uint8_t pressed;
@@ -84,8 +275,9 @@ void App_Run(void)
     }
 
     /* ---- 2. 输入 ----
-       按键: 事件式, "取走即清"(采样在 1ms 中断里, 见 Encoder_SwTick1ms)
-       旋转: 读净格数并清零, 内部关中断保护 */
+       按键: 事件式, "取走即清"(采样在 FreeRTOS 的 1ms tick 钩子里,
+             见 Tick.c 的 vApplicationTickHook)
+       旋转: 读净格数并清零, 内部用 taskENTER_CRITICAL 保护 */
     pressed = Encoder_SwTakePress();
     delta   = Encoder_ReadDelta();
 
@@ -124,6 +316,8 @@ void App_Run(void)
     }
 }
 
+/* App.c 不再对外暴露 App_Run —— 现在整个循环体归 UiTask 私有。 */
+
 /* ======================= 界面切换 ======================= */
 /* 切到某个界面。三步顺序不能反。 */
 static void UI_Enter(ui_screen_t s)
@@ -138,9 +332,13 @@ static void UI_Enter(ui_screen_t s)
           现象是一进功能界面就立刻弹回主菜单, **看着像菜单根本进不去**。 */
     (void)Encoder_SwTakePress();
 
+    /* ③ 先改状态, **再**画。
+       顺序有讲究: s_screen 一改, CameraTask 就算醒着也不会再画了
+       (它在锁内会复查这个值)。反过来的话, 会出现"菜单刚画好又被相机帧
+       盖掉"的窗口。 */
     s_screen = s;
 
-    /* ③ 画该界面的静态部分(各 Draw*Chrome 内部会清屏) */
+    /* ④ 画该界面的静态部分(各 Draw*Chrome 内部自带加锁, 会清屏) */
     switch (s)
     {
         case UI_SERVO:
@@ -164,6 +362,14 @@ static void UI_Enter(ui_screen_t s)
         default:
             Menu_DrawMain(s_sel);
             break;
+    }
+
+    /* ⑤ 叫醒 CameraTask, 让它重新判断该抓帧还是该睡。
+       ⚠ 放最后: 先把该画的画完再通知, 免得它抢在前面把画面画出来,
+         又被这里的 Chrome 覆盖掉(白画一帧, 还要多占一次锁)。 */
+    if (s_cam_task != NULL)
+    {
+        (void)xTaskNotifyGive(s_cam_task);
     }
 }
 
@@ -224,39 +430,17 @@ static void UI_Servo(int32_t delta, uint8_t pressed)
 }
 
 /* ======================= 摄像头界面 ======================= */
+/* 摄像头界面在 UiTask 这边只剩一件事: 响应"再按一次退出"。
+   抓帧和送屏全部挪到了 CameraTask —— 这正是按键能立刻响应的原因:
+   UiTask 再也不需要等那 66.7ms 的一帧了。
+
+   ⚠ 别把抓帧搬回这里。搬回来就等于退回移植前的行为。 */
 static void UI_Camera(uint8_t pressed)
 {
     if (pressed != 0U)                          /* 再按一次 = 退出 */
     {
         UI_Enter(UI_MAIN_MENU);
-        return;
     }
-
-    /* 开机就探测到摄像头不在线: 画面停在"无信号"不动, 不要去抓帧 ——
-       否则每轮要白等 3 次 200ms 超时, 按键会变得几乎没反应 */
-    if (OV7670_IsPresent() == 0U) { return; }
-
-    /* 抓一帧。抓不到就**跳过读出** —— 读出来的是 FIFO 里的陈旧内容(上一帧
-       的残影), 显示它还不如保持上一帧不动 */
-    if (OV7670_CaptureFrame() == 0U) { return; }
-
-    OV7670_ReadFrameRotated();
-    LCD_DrawImage(4U, 0U, CAM_ROT_W, CAM_ROT_H, OV7670_GetFrameBuf());
-
-    /* ---- 帧率: 数满 1 秒算一次 ----
-       摄像头只在这里抓帧, 所以这个数就是真实的显示帧率。
-       实测约 8~9fps, 别以为是 bug: 等相机出一整帧就要 66.7ms(12MHz 晶振),
-       再叠加读 FIFO 并旋转 ~35ms、DMA 送屏 14.6ms。 */
-    s_frames++;
-    if (Tick_Elapsed(s_fps_t0, 1000U) != 0U)
-    {
-        s_fps    = (s_frames > 99U) ? 99U : (uint8_t)s_frames;
-        s_frames = 0U;
-        s_fps_t0 = Tick_GetMs();
-    }
-
-    /* ⚠ 每帧都要重画, 而且必须在 LCD_DrawImage() 之后 —— 画面会把右上角盖掉 */
-    Menu_DrawCameraFps(s_fps);
 }
 
 /* ======================= 开机横幅 ======================= */
@@ -361,3 +545,62 @@ static void Diag_PrintLevels(void)
     Usart_SendBytes(buf, n);
 }
 #endif
+
+/* ========================================================================
+ * FreeRTOS 钩子 —— 教学脚手架, 开关在 FreeRTOSConfig.h
+ *
+ * 为什么值得开:
+ *   初学 RTOS 最常见的翻车是"系统莫名卡死" —— 任务栈给小了、或者
+ *   configTOTAL_HEAP_SIZE 不够导致建任务失败。**默认情况下这两种都不报错**,
+ *   只是行为诡异(某个任务再也不跑 / 某个任务根本没建起来)。
+ *   开了这两个钩子, 出问题会当场停在明处。
+ *
+ * ⚠ 钩子里只做最简单的活: 打印 + 点灯 + 死循环。**不要调任何 FreeRTOS API,
+ *   不要 malloc** —— 走到这里内核状态已经不可信了。
+ * ⚠ 字符串长度一律用 sizeof(字面量) - 1 算, 不手写数字, 免得数错发出去乱码。
+ * ====================================================================== */
+
+/* 任务栈溢出(由 configCHECK_FOR_STACK_OVERFLOW = 2 触发)。
+   pcTaskName 是任务名, 能直接告诉你是谁溢出。 */
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+    static const char P1[] = "\r\n[RTOS] 栈溢出! 任务 = ";
+    static const char P2[] = "\r\n";
+
+    (void)xTask;
+
+    Usart_SendBytes((const uint8_t *)P1, sizeof(P1) - 1U);
+
+    if (pcTaskName != NULL)
+    {
+        /* 任务名是 '\0' 结尾的短字符串, 逐字符发 */
+        while (*pcTaskName != '\0')
+        {
+            Usart_SendBytes((const uint8_t *)pcTaskName, 1U);
+            pcTaskName++;
+        }
+    }
+
+    Usart_SendBytes((const uint8_t *)P2, sizeof(P2) - 1U);
+
+    Led_Force(1U);              /* 灯常亮 = 出事了(正常是每 500ms 翻一次) */
+    for (;;)
+    {
+    }
+}
+
+/* 内核堆耗尽(建任务/队列时 pvPortMalloc 失败)。
+   最常见的修法是把 FreeRTOSConfig.h 里的 configTOTAL_HEAP_SIZE 调大,
+   或者把某个任务的栈调小。 */
+void vApplicationMallocFailedHook(void)
+{
+    static const char MSG[] =
+        "\r\n[RTOS] 堆耗尽! 把 configTOTAL_HEAP_SIZE 调大, 或减小任务栈\r\n";
+
+    Usart_SendBytes((const uint8_t *)MSG, sizeof(MSG) - 1U);
+
+    Led_Force(1U);
+    for (;;)
+    {
+    }
+}

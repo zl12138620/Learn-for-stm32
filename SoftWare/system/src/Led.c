@@ -30,7 +30,19 @@ void Led_Init(void)
     GPIO_Init(LED_PORT, &g);
 
     GPIO_ResetBits(LED_PORT, LED_PIN);     /* 先灭 */
-    s_last_ms = Tick_GetMs();
+
+    /* ⚠ 这里**故意**写 0 而不是 Tick_GetMs()。
+       Led_Init() 在调度器启动之前跑, 那时候 tick 还没开始计数, Tick_GetMs()
+       恒返回 0 —— 写 0 和调它是等价的, 但写死更不容易让人误会
+       "这里取了个有意义的时间戳"。 */
+    s_last_ms = 0U;
+}
+
+void Led_Force(uint8_t on)
+{
+    /* PB2 高电平点亮 */
+    if (on != 0U) { GPIO_SetBits(LED_PORT, LED_PIN); }
+    else          { GPIO_ResetBits(LED_PORT, LED_PIN); }
 }
 
 void Led_Heartbeat(void)

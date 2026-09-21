@@ -27,17 +27,15 @@ extern "C" {
 #include "stm32f4xx.h"
 
 /* ============================ API ============================ */
-/* 开机横幅 + 画主菜单。
+/* 建三个任务(UiTask / CameraTask / LedTask) + 建 LCD 互斥量。
+   ⚠ 在**调度器启动之前**调(main.c 里), 所以它自己不能阻塞、也不该依赖 tick。
    ⚠ 调用前必须先完成: Usart_Init()(要打印)、LCD_Init()(要画)、
-     OV7670_Init()(横幅要读它的 ID)、Servo_Init()、Encoder_Init()、Tick_Init()。
-   顺序在 USER/main.c 里, 一眼能看全。 */
-void App_Init(void);
+     OV7670_Init()(横幅要读它的 ID)、Servo_Init()、Encoder_Init()。
+   顺序在 USER/main.c 里, 一眼能看全。
 
-/* 主循环每轮调一次。内部顺序:
-     串口回显 -> 取按键(可能切屏) -> 取编码器增量 -> 按界面干活
-   按键必须在分发**之前**处理 —— 这样摄像头界面能"先判断要不要退出,
-   再决定这一轮要不要花 ~95ms 去抓帧"。 */
-void App_Run(void);
+   任务的活都写在 App.c 里, 对外再也不需要别的入口 —— 以前那个
+   `App_Run()` 已经变成 UiTask 的私有实现(App_UiRun), 不再暴露。 */
+void App_Init(void);
 
 #ifdef __cplusplus
 }

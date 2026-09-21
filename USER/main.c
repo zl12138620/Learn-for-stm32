@@ -22,6 +22,15 @@
 
 int main(void)
 {
+    /* ---- 0. NVIC 优先级分组: 必须放在**任何 NVIC_Init / 中断使能之前** ----
+       ⚠ 这一步以前漏了, 而且后果极其隐蔽:
+         FreeRTOS 要求 4 位优先级全给"抢占优先级"(PriorityGroup_4)。
+         而 StdPeriph 的 NVIC_Init() 是拿 AIRCR.PRIGROUP 现算寄存器的 ——
+         PRIGROUP 保持复位值时算出来是 0x00, 也就是说 Encoder.c 里写的
+         "抢占优先级 4 / 5" **一个字节都没写进去**, 三个中断实际同优先级。
+         不设这一条, 后面那些优先级数字全是白写。 */
+    NVIC_PriorityGroupConfig(NVIC_PriorityGroup_4);
+
     /* ---- 1. 先把"能报信"的弄好 ----
        串口和 LED 放在最前面: 后面任何一个外设初始化卡住, 至少还知道
        固件跑到了哪一步。串口能出横幅、灯会闪, 排障就有抓手。 */
@@ -34,28 +43,21 @@ int main(void)
     LCD_Init();
 
     /* ---- 3. 外设 ----
-       ⚠ 顺序有讲究: **Tick_Init() 必须放最后** —— 它一开 SysTick 中断,
-         Encoder_SwTick1ms() 马上就开始被调了, 所以必须等 Encoder_Init()
-         把 PB5/PB6/PB7 配好之后再启动。 */
+       编码器的按键采样挂在 FreeRTOS 的 tick 钩子上(见 Tick.c), 而 tick 要等
+       vTaskStartScheduler() 才开始跑 —— 所以这里只要把引脚配好就行。 */
     OV7670_Init();      /* PE0~PE15 + PB0/PB1, 内部要等约 200ms */
     Servo_Init();       /* PA1 + TIM5_CH2, 上电回中位 90° */
     Encoder_Init();     /* A=PB6 B=PB5 SW=PB7 + EXTI6 + TIM7 消抖 */
-    Tick_Init();        /* SysTick 1ms: 按键采样 + 帧率统计 + 心跳计时 */
 
-    /* ---- 4. 应用层 ----
-       打开机横幅 + 画主菜单。必须在 Usart / LCD / OV7670 / Tick 都就绪之后。 */
+    /* ---- 4. 应用层: 建任务(此时还没开始调度) ---- */
     App_Init();
 
-    /* ======================= 主循环 =======================
-       就两件事, 顺序不能换:
-         App_Run()       内部是"串口回显 -> 取按键(可能切屏) -> 按界面干活"
-         Led_Heartbeat() 主循环还活着就翻灯
+    /* ---- 5. 启动调度器 —— 这个函数**不返回** ----
+       SysTick 从这一刻起归 FreeRTOS, 所有任务开始跑。
+       下面的 while 只有一种情况会执行到: 内核堆连空闲任务都建不起来。 */
+    vTaskStartScheduler();
 
-       ⚠ 心跳必须留在主循环里, 不要挪进中断 —— 主循环一旦卡住灯就停,
-         这正是它当故障指示的意义。挪进中断的话主循环死锁灯也照闪。 */
     while (1)
     {
-        App_Run();
-        Led_Heartbeat();
     }
 }

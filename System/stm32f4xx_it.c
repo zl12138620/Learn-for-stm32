@@ -100,14 +100,15 @@ void UsageFault_Handler(void)
   }
 }
 
-/**
-  * @brief  This function handles SVCall exception.
-  * @param  None
-  * @retval None
-  */
-void SVC_Handler(void)
-{
-}
+/* SVC_Handler 和 PendSV_Handler 都已移出本文件。
+   2026-09-22 移植 FreeRTOS: 这两个异常现在由内核接管 ——
+   FreeRTOS-Kernel/portable/GCC/ARM_CM4F/port.c 提供
+   vPortSVCHandler / xPortPendSVHandler, 在 SoftWare/system/inc/FreeRTOSConfig.h
+   里 #define 成了 SVC_Handler / PendSV_Handler。
+
+   ⚠ 不要在本文件里重新定义这两个 —— 会链接报 multiple definition。
+
+   注意 DebugMon_Handler 还留着(下面), 内核不用这个异常。 */
 
 /**
   * @brief  This function handles Debug Monitor exception.
@@ -115,15 +116,6 @@ void SVC_Handler(void)
   * @retval None
   */
 void DebugMon_Handler(void)
-{
-}
-
-/**
-  * @brief  This function handles PendSVC exception.
-  * @param  None
-  * @retval None
-  */
-void PendSV_Handler(void)
 {
 }
 

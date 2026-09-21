@@ -39,6 +39,15 @@ typedef enum
 } menu_item_t;
 
 /* ============================ API ============================ */
+/* ⚠ 下面每个函数**内部都会获取 LCD 互斥量**, 可以在任意任务里直接调。
+   代价是**不能在公开函数之间互相调用** —— 普通互斥量不可重入, 会死锁。
+   需要复用就抽不带锁的 static 内部函数(见 Menu.c 的 Menu_CursorDraw /
+   Menu_CameraFpsDraw)。 */
+
+/* 建 LCD 互斥量。必须在**建任何会画屏的任务之前**调,
+   一般在 App_Init() 里、xTaskCreate 之前。 */
+void Menu_Init(void);
+
 /* ---------- 主菜单 ---------- */
 void Menu_DrawMain(uint8_t sel);              /* 整屏画一次(进入主菜单时调) */
 void Menu_DrawCursor(uint8_t row, uint8_t on);/* 只动"箭头+方框"; 切换选中时调 */
@@ -48,9 +57,22 @@ void Menu_DrawServoChrome(void);              /* 标题/单位/进度条外框(�
 void Menu_DrawServoValue(uint8_t deg);        /* 角度数字 + 进度条填充(变化时调) */
 
 /* ---------- 摄像头界面 ---------- */
-void Menu_DrawCameraChrome(void);             /* 右上角"帧率"标签(进入时调) */
-void Menu_DrawCameraFps(uint8_t fps);         /* 每帧调, 紧跟 LCD_DrawImage 之后 */
+void Menu_DrawCameraChrome(void);             /* 清屏 + 帧率占位(进入时调) */
+
+/* 画面 + 帧率。⚠ **不加锁**, 调用方自己加 —— 而且判断也要在锁里:
+       Menu_Lock();
+       if (s_screen == UI_CAMERA) { Menu_DrawCameraFrameLocked(buf, fps); }
+       Menu_Unlock();
+   为什么非要这样, Menu.c 里这个函数的注释写清楚了(界面切换的竞争)。 */
+void Menu_DrawCameraFrameLocked(const uint16_t *buf, uint8_t fps);
+
 void Menu_DrawCameraNoSignal(void);           /* 摄像头没接好时的提示 */
+
+/* ---------- 手动加解锁 ----------
+   ⚠ 正常情况下**不要用** —— 上面那些 Menu_DrawXxx 自带加锁。
+   只有一种场合需要: 判断和画必须原子完成时(见 App.c 的 CameraTask)。 */
+void Menu_Lock(void);
+void Menu_Unlock(void);
 
 #ifdef __cplusplus
 }

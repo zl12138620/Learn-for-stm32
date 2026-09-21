@@ -71,6 +71,15 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/USER)
 foreach(domain ${APP_DOMAINS})
   include_directories(${CMAKE_CURRENT_SOURCE_DIR}/SoftWare/${domain}/inc)
 endforeach()
+
+# FreeRTOS 内核头(第三方)。放 SYSTEM 里, 免得它内部的宏重定义污染我们的编译输出。
+# ⚠ FreeRTOSConfig.h 不在这里 —— 那是**本工程的配置**, 在 SoftWare/system/inc/,
+#   走上面的领域路径。内核源码一个字都不改, 要调行为只改那个配置。
+include_directories(SYSTEM
+  ${CMAKE_CURRENT_SOURCE_DIR}/FreeRTOS-Kernel/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/FreeRTOS-Kernel/portable/GCC/ARM_CM4F
+)
+
 include_directories(SYSTEM
   ${CMAKE_CURRENT_SOURCE_DIR}/System
   ${LIB_ROOT}/Libraries/CMSIS/Include
@@ -95,6 +104,17 @@ foreach(domain ${APP_DOMAINS})
   list(APPEND APP_SOURCES ${domain_sources})
 endforeach()
 
+# FreeRTOS 内核源码(第三方, 见 FreeRTOS-Kernel/README.md)。
+# 根目录那几个 .c 全是内核本体, 整体收没问题;
+# ⚠ 但 **portable/ 绝对不能整体 GLOB** —— 它下面每个架构/编译器都有同名
+#   port.c(还有各种 heap_x.c), 一起编译会重复定义且大量编译不过。
+#   只显式挑本工程这条路径: GCC + Cortex-M4F(带 FPU) + heap_4。
+file(GLOB FREERTOS_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/FreeRTOS-Kernel/*.c)
+list(APPEND FREERTOS_SOURCES
+  ${CMAKE_CURRENT_SOURCE_DIR}/FreeRTOS-Kernel/portable/GCC/ARM_CM4F/port.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/FreeRTOS-Kernel/portable/MemMang/heap_4.c
+)
+
 # STM32F407 (STM32F40_41xxx) 没有以下外设模块，排除以免编译报错
 # (DMA2D/LTDC/DSI/SAI/QSPI/SPDIFRX/FMC/FMPI2C/LPTIM/CEC/DFSDM)
 list(FILTER SPL_SOURCES EXCLUDE REGEX
@@ -116,6 +136,7 @@ add_executable(${TARGET_NAME}.elf
   ${USER_SOURCES}
   ${SYSTEM_SOURCES}
   ${APP_SOURCES}
+  ${FREERTOS_SOURCES}
   ${SPL_SOURCES}
 )
 

@@ -27,6 +27,42 @@
 #include "Menu.h"
 #include "LCD.h"
 
+#include "FreeRTOS.h"
+#include "semphr.h"
+
+/* ============================ LCD 互斥量 ============================
+   UiTask 和 CameraTask 都会画屏: UiTask 画菜单/舵机界面, CameraTask 画摄像头
+   画面。不加锁的话, CameraTask 那 14.6ms 的整块 DMA 传输可能插在 UiTask 一次
+   界面重画的中间 —— 而 LCD 的"设窗口"和"发数据"是两步, 被插进去就会**花屏**
+   (菜单里混进几行摄像头像素)。
+
+   锁只放在这一处: 所有画屏都走本文件的公开函数, 由它们自己加锁。
+   App.c 因此不用管"哪里该加锁"的纪律, 少一类出错的机会。
+
+   ⚠ **公开函数内部不要再调另一个公开函数** —— 普通互斥量不可重入, 会死锁。
+     要复用就抽成下面那些不带锁的 static 内部函数(例如 Menu_CursorDraw)。 */
+static SemaphoreHandle_t s_lcd_lock = NULL;
+
+/* ⚠ 这两个是**公开**的, 但正常情况下不该用 —— 所有 Menu_DrawXxx 自带加锁。
+   只有一种场合例外: 当"要不要画"这个判断必须和"画"原子完成时
+   (见 App.c 的 CameraTask: 它要在锁内复查界面有没有被切走)。
+   其余地方请直接用那些自带锁的函数, 别手动加锁。 */
+void Menu_Lock(void)
+{
+    /* 建锁失败(堆不够)会在别处先报出来, 这里兜一下别解引用空指针 */
+    if (s_lcd_lock != NULL) { (void)xSemaphoreTake(s_lcd_lock, portMAX_DELAY); }
+}
+
+void Menu_Unlock(void)
+{
+    if (s_lcd_lock != NULL) { (void)xSemaphoreGive(s_lcd_lock); }
+}
+
+void Menu_Init(void)
+{
+    s_lcd_lock = xSemaphoreCreateMutex();
+}
+
 /* ============================ 颜色 ============================ */
 #define C_BG        LCD_BLACK
 #define C_BAR_BG    LCD_BLUE        /* 标题栏底色(反色, 每屏都有一条) */
@@ -162,17 +198,22 @@ static void Menu_DrawItemText(uint8_t row, uint16_t fg)
     LCD_ShowCN(M_TEXT_X, (uint16_t)(top + M_SUB_DY),  s_item_sub[row],  C_SUB,   C_BG);
 }
 
+/* 不带锁的内部版, 定义在下面 —— Menu_DrawMain 要先声明才能用 */
+static void Menu_CursorDraw(uint8_t row, uint8_t on);
+
 /* ============================ 主菜单 ============================ */
 void Menu_DrawMain(uint8_t sel)
 {
     uint8_t r;
+
+    Menu_Lock();                    /* 整屏重画期间不许别人插进来 */
 
     LCD_Clear(C_BG);
 
     Menu_DrawTitleBar("主菜单");
 
     /* 先把所有项按"未选中"画一遍(名字白、方框深灰),
-       选中效果由 Menu_DrawCursor 单独叠上去 —— 这样切换选中时
+       选中效果由 Menu_CursorDraw 单独叠上去 —— 这样切换选中时
        不用整屏重画 */
     for (r = 0U; r < (uint8_t)MENU_ITEM_COUNT; r++)
     {
@@ -187,13 +228,20 @@ void Menu_DrawMain(uint8_t sel)
     LCD_ShowCN(32U, M_HINT1_Y, "旋转选择", C_HINT, C_BG);
     LCD_ShowCN(32U, M_HINT2_Y, "按下进入", C_HINT, C_BG);
 
-    Menu_DrawCursor(sel, 1U);
+    /* ⚠ 这里必须调**不带锁**的内部版 —— 锁已经拿在手里了,
+       再调带锁的 Menu_DrawCursor 会嵌套加锁 -> 死锁 */
+    Menu_CursorDraw(sel, 1U);
+
+    Menu_Unlock();
 }
 
 /* 切换选中时只动这一项: 方框颜色、箭头、名字颜色。
    on=0 是"恢复成未选中" —— 注意方框不是擦掉而是**重画成深灰**,
-   因为现在每一项都带框, 擦出个白洞反而更怪。 */
-void Menu_DrawCursor(uint8_t row, uint8_t on)
+   因为现在每一项都带框, 擦出个白洞反而更怪。
+
+   ⚠ 这是**不带锁**的内部版, 只给已经持有锁的 Menu_DrawMain 用。
+     外部调用请用下面的 Menu_DrawCursor()。 */
+static void Menu_CursorDraw(uint8_t row, uint8_t on)
 {
     uint16_t top;
 
@@ -215,6 +263,14 @@ void Menu_DrawCursor(uint8_t row, uint8_t on)
     }
 }
 
+/* 带锁的公开版: 转动编码器切换选中时调它 */
+void Menu_DrawCursor(uint8_t row, uint8_t on)
+{
+    Menu_Lock();
+    Menu_CursorDraw(row, on);
+    Menu_Unlock();
+}
+
 /* ============================ 舵机界面 ============================ */
 /* 进度条当前画到多宽。Menu_DrawServoValue() 靠它算出"哪一段需要重画",
    从而避免整条清空再重画导致的闪动(详见那个函数的注释)。
@@ -224,6 +280,8 @@ static uint16_t s_bar_last_w = 0U;
 
 void Menu_DrawServoChrome(void)
 {
+    Menu_Lock();
+
     LCD_Clear(C_BG);
 
     s_bar_last_w = 0U;          /* 屏已清空, 同步复位进度条的"已画宽度" */
@@ -243,6 +301,8 @@ void Menu_DrawServoChrome(void)
     LCD_Fill(0U, M_FOOT_SEP_Y, LCD_W, 1U, C_SEP);
     LCD_ShowCN(32U, S_HINT1_Y, "旋转调角", C_HINT, C_BG);
     LCD_ShowCN(32U, S_HINT2_Y, "按下退出", C_HINT, C_BG);
+
+    Menu_Unlock();
 }
 
 void Menu_DrawServoValue(uint8_t deg)
@@ -250,6 +310,8 @@ void Menu_DrawServoValue(uint8_t deg)
     uint16_t fill_w;
 
     if (deg > 180U) { deg = 180U; }
+
+    Menu_Lock();
 
     Menu_DrawNum(S_NUM_X, S_ROW_Y, deg, 3U, C_VALUE, C_BG);
 
@@ -276,22 +338,16 @@ void Menu_DrawServoValue(uint8_t deg)
     }
 
     s_bar_last_w = fill_w;
+
+    Menu_Unlock();
 }
 
 /* ============================ 摄像头界面 ============================ */
-void Menu_DrawCameraChrome(void)
-{
-    LCD_Clear(C_BG);
-    /* 这里**不画**"帧率"标签, 交给 Menu_DrawCameraFps() —— 理由见下 */
-    Menu_DrawCameraFps(0U);             /* 第一帧到达前先占个位, 免得空着 */
-}
-
-/* ⚠ 必须**每一帧**都调, 而且要在 LCD_DrawImage() 之后调。
-   注意"帧率"这两个字也要一起重画: 画面从 x=4 铺到 x=123, 而标签在
-   x=80~111 —— 整块都会被 LCD_DrawImage() 覆盖掉, 只重画数字的话
-   标签第一帧之后就消失了。这也是 Chrome 里不画标签的原因。
-   开销: 2 个汉字 + 2 位数字 ≈ 0.6ms, 相对一轮 95ms 可以忽略。 */
-void Menu_DrawCameraFps(uint8_t fps)
+/* 不带锁的内部版: 画右上角那个"帧率 xx"。
+   ⚠ 每一帧都要重画, 而且必须在画面之后 —— 画面从 x=4 铺到 x=123,
+     而标签在 x=80~111, 整块都会被 LCD_DrawImage() 覆盖掉, 只重画数字的话
+     标签第一帧之后就消失了。这也是 Chrome 里不画标签的原因。 */
+static void Menu_CameraFpsDraw(uint8_t fps)
 {
     if (fps > 99U) { fps = 99U; }       /* 定宽 2 位, 超了也画不下 */
 
@@ -299,8 +355,49 @@ void Menu_DrawCameraFps(uint8_t fps)
     Menu_DrawNum(CAM_FPS_NUM_X, CAM_FPS_Y, fps, 2U, C_VALUE, C_BG);
 }
 
+void Menu_DrawCameraChrome(void)
+{
+    Menu_Lock();
+
+    LCD_Clear(C_BG);
+    Menu_CameraFpsDraw(0U);             /* 第一帧到达前先占个位, 免得空着 */
+
+    Menu_Unlock();
+}
+
+/* 摄像头画面 + 帧率。
+ *
+ * ⚠ **本函数不加锁**, 调用方负责。用法(见 App.c 的 CameraTask):
+ *
+ *     Menu_Lock();
+ *     if (s_screen == UI_CAMERA) { Menu_DrawCameraFrameLocked(buf, fps); }
+ *     Menu_Unlock();
+ *
+ * 为什么非要"锁内判断 + 锁内画"这个组合 —— 这是整个任务拆分里唯一一处
+ * 需要小心的并发:
+ *
+ *   UiTask 切走界面时是「先把 s_screen 改成 MENU, 再去画菜单(画的时候加锁)」。
+ *   CameraTask 如果**在锁外**判断"还在摄像头界面吗", 存在这样一个窗口:
+ *     它判断完(还在) -> UiTask 改状态并抢到锁画完菜单 -> CameraTask 才拿到锁
+ *     把那帧相机画面**盖到刚画好的菜单上**, 而且没人会再重画菜单, 就这么花着。
+ *
+ *   把判断挪进锁里之后, 两种交错都收敛到同一个结果:
+ *     · CameraTask 先拿到锁 -> UiTask 改完状态后在锁上等 -> 相机帧先画,
+ *       菜单随后盖上去 -> **菜单赢** ✓
+ *     · UiTask 先拿到锁 -> CameraTask 等到锁时 s_screen 已经是 MENU -> 直接跳过 ✓
+ */
+void Menu_DrawCameraFrameLocked(const uint16_t *buf, uint8_t fps)
+{
+    LCD_DrawImage(CAM_IMG_X, 0U, 120U, 160U, buf);
+    Menu_CameraFpsDraw(fps);
+}
+
 void Menu_DrawCameraNoSignal(void)
 {
+    Menu_Lock();
+
     /* 居中: "无信号" 3 字 x 16 = 48px -> (128-48)/2 = 40 */
     LCD_ShowCN(40U, 72U, "无信号", C_VALUE, C_BG);
+
+    Menu_Unlock();
 }

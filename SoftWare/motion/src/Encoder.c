@@ -21,6 +21,9 @@
 #include "Encoder.h"
 #include "Tick.h"       /* 按键采样要挂到 1ms 时基上(见 Encoder_Init 末尾) */
 
+#include "FreeRTOS.h"
+#include "task.h"
+
 /* 按键采样函数: 只给 Tick 的 1ms 回调用, 不对外暴露 */
 static void Encoder_SwTick1ms(void);
 
@@ -34,19 +37,44 @@ static volatile uint8_t  s_sw_stable = 1U;  /* 消抖后的电平: 1=松开 0=�
 static volatile uint8_t  s_sw_cnt    = 0U;  /* 与稳定电平不一致的连续毫秒数 */
 static volatile uint8_t  s_sw_press  = 0U;  /* 按下事件标志, 主循环取走即清 */
 
-/* 临界区: 保存并恢复 PRIMASK。
-   不用 __disable_irq()/__enable_irq() 裸配对 —— 那样如果以后从别处的
-   临界区里调用这些函数, 会把中断提前打开。 */
+/* ======================= NVIC 抢占优先级 =======================
+   ⚠ FreeRTOS 的硬性规定: 任何要调用 ...FromISR() 的中断, 抢占优先级必须
+     **数值上 ≥ configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY**(本工程是 5)。
+     数值越小优先级越高, 所以原来的 4 属于"比阈值还高" —— 那种中断不会被
+     内核的临界区屏蔽, 也就绝不能在里面调 FreeRTOS API, 否则会命中
+     vPortValidateInterruptPriority() 的断言。
+
+     EXTI 原来是 4, 现在统一成 5。这两个中断目前确实没调 FreeRTOS API
+     (只改几个 volatile 变量、读写寄存器), 但设成合规的值以后想加就随时能加。
+
+     ⚠ 光改这里没用 —— 还必须先在 main() 里
+       NVIC_PriorityGroupConfig(NVIC_PriorityGroup_4),
+       否则 StdPeriph 算出来的寄存器值会把这些数字**整体丢掉**。
+       (移植前就是这个状态: 三个中断实际同优先级, 写的 4 和 5 一个字节都没生效) */
+#define ENC_EXTI_PRIO   5U
+#define ENC_TIM_PRIO    5U
+
+/* 临界区: 直接转发到 FreeRTOS 的宏。
+ *
+ * 2026-09-22 移植 FreeRTOS 前这里是 __disable_irq() / __set_PRIMASK(),
+ * 也就是**关全局中断**(PRIMASK) —— 那会把内核的 tick 和整个调度器一起挡掉。
+ * FreeRTOS 的 taskENTER_CRITICAL()/taskEXIT_CRITICAL() 用的是 BASEPRI,
+ * 只屏蔽"优先级低于阈值"的中断, tick 和 PendSV 照常走, 这才是内核期望的用法。
+ *
+ * ⚠ 这三个函数的调用者全都在**任务上下文**(UiTask/AppTask), 所以用任务版
+ *   的宏是对的。中断里要用得换 portSET_INTERRUPT_MASK_FROM_ISR()。
+ * ⚠ 临界区里不许调用任何会阻塞的 API(包括 vTaskDelay / 带 FromISR 的),
+ *   本文件里只是几条读改写, 没问题。 */
 static uint32_t Enc_CriticalEnter(void)
 {
-  uint32_t primask = __get_PRIMASK();
-  __disable_irq();
-  return primask;
+  taskENTER_CRITICAL();
+  return 0U;                    /* 返回值保留着, 免得改一堆调用点 */
 }
 
 static void Enc_CriticalExit(uint32_t primask)
 {
-  __set_PRIMASK(primask);
+  (void)primask;                /* taskEXIT_CRITICAL 内部自己维护嵌套计数 */
+  taskEXIT_CRITICAL();
 }
 
 /* ========================================================================
@@ -79,7 +107,7 @@ void Encoder_Init(void)
   EXTI_Init(&EXTI_InitStructure);
 
   NVIC_InitStructure.NVIC_IRQChannel                   = ENC_EXTI_IRQn;
-  NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 4;
+  NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = ENC_EXTI_PRIO;
   NVIC_InitStructure.NVIC_IRQChannelSubPriority        = 0;
   NVIC_InitStructure.NVIC_IRQChannelCmd                = ENABLE;
   NVIC_Init(&NVIC_InitStructure);
@@ -98,7 +126,7 @@ void Encoder_Init(void)
   TIM_ITConfig(TIM7, TIM_IT_Update, DISABLE);
 
   NVIC_InitStructure.NVIC_IRQChannel                   = TIM7_IRQn;
-  NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 5;
+  NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = ENC_TIM_PRIO;
   NVIC_InitStructure.NVIC_IRQChannelSubPriority        = 0;
   NVIC_InitStructure.NVIC_IRQChannelCmd                = ENABLE;
   NVIC_Init(&NVIC_InitStructure);

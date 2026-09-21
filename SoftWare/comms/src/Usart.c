@@ -15,6 +15,11 @@
 #define USART1_TX_PIN       GPIO_Pin_9
 #define USART1_RX_PIN       GPIO_Pin_10
 
+/* NVIC 抢占优先级。必须**数值上 ≥ configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY**
+   (本工程是 5), 否则这个 ISR 属于"内核临界区屏蔽不到"的那一档, 里面不许调
+   任何 FreeRTOS API。见 FreeRTOSConfig.h。 */
+#define USART1_PRIO         5U
+
 /* ======================= 接收缓冲 ======================= */
 /* 生产者 = USART1_IRQHandler(中断上下文), 消费者 = Usart_ReadByte(主循环)。
    两个 static, 外部拿不到 —— 想读就调 Usart_ReadByte(), 这样环形缓冲的
@@ -27,6 +32,7 @@ void Usart_Init(uint32_t baudrate)
 {
     GPIO_InitTypeDef        gpio;
     USART_InitTypeDef       uart;
+    NVIC_InitTypeDef        NVIC_InitStructure;
 
     /* ---- 引脚: PA9=TX / PA10=RX, 复用推挽 ---- */
     RCC_AHB1PeriphClockCmd(USART1_IO_CLK, ENABLE);
@@ -54,10 +60,24 @@ void Usart_Init(uint32_t baudrate)
     USART_Init(USART1, &uart);
     USART_Cmd(USART1, ENABLE);
 
-    /* ---- 接收: 每个字节进环形缓冲, 主循环再取 ---- */
+    /* ---- 接收: 每个字节进环形缓冲, 任务里再取 ---- */
     RingBuf_Init(&s_rx, s_rx_mem, sizeof(s_rx_mem));
     USART_ITConfig(USART1, USART_IT_RXNE, ENABLE);
-    NVIC_EnableIRQ(USART1_IRQn);
+
+    /* ⚠ 必须**显式**设优先级。
+       移植 FreeRTOS 前这里只有一句 NVIC_EnableIRQ(), 优先级保持复位值(最高),
+       属于"内核临界区屏蔽不到"的那一档。本 ISR 现在只往环形缓冲塞一个字节、
+       没调任何 FreeRTOS API, 所以不改也能跑 —— 但设成合规值之后,
+       以后想在中断里用 ...FromISR() 就随时能用, 不用回头再查一遍。
+
+       数值 5 = configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY(见 FreeRTOSConfig.h)。
+       ⚠ 这个数字要生效, 前提是 main() 里已经 NVIC_PriorityGroupConfig(
+         NVIC_PriorityGroup_4) 了。 */
+    NVIC_InitStructure.NVIC_IRQChannel                   = USART1_IRQn;
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = USART1_PRIO;
+    NVIC_InitStructure.NVIC_IRQChannelSubPriority        = 0;
+    NVIC_InitStructure.NVIC_IRQChannelCmd                = ENABLE;
+    NVIC_Init(&NVIC_InitStructure);
 }
 
 /* ======================= 发送 ======================= */

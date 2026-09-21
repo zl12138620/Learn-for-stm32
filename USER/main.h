@@ -30,6 +30,12 @@
 #include <stdbool.h>
 #include <string.h>
 
+/* FreeRTOS 内核。FreeRTOS.h 会 #include "FreeRTOSConfig.h"
+   (在 SoftWare/system/inc/, 那是本工程唯一的内核配置入口)。
+   ⚠ 顺序不能反: FreeRTOS.h 必须在 task.h / semphr.h 这些之前。 */
+#include "FreeRTOS.h"
+#include "task.h"
+
 /* 与 main.c 里那张初始化清单一一对应 */
 #include "Led.h"        /* system/   心跳灯 */
 #include "Usart.h"      /* comms/    调试串口 */
