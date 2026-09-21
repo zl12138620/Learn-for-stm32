@@ -22,6 +22,7 @@
   */
 
 #include "OV7670.h"
+#include "Tick.h"           /* 抓帧超时要用毫秒时基 */
 
 /* ======================= 引脚 ======================= */
 /* SIO_C / SIO_D: SCCB 控制口(I2C 的简化版) */
@@ -103,6 +104,12 @@ static void CAM_Delay_ms(uint32_t ms)
 /* ======================= 帧缓冲 ======================= */
 /* 120x160 个 RGB565 = 38400 字节, 放 .bss */
 static uint16_t s_frame[CAM_ROT_W * CAM_ROT_H];
+
+/* 摄像头是否在线 —— 开机读一次 PID(0x0A) 判断, 正常是 0x76。
+   为什么要有这个标志: 没接摄像头时 SCCB 写不报错, 但抓帧会一路走到
+   VSYNC 超时(每帧白等 200ms×3)。上层看到 0 就直接显示"无信号",
+   不进抓帧路径。 */
+static uint8_t s_cam_ok = 0U;
 
 /* ======================= SCCB ======================= */
 /* OV7670 的从机地址: 写 = 0x42, 读 = 0x43 */
@@ -347,10 +354,32 @@ void OV7670_Init(void)
 	}
 
 	CAM_Delay_ms(100U);
+
+	/* ---- 探测摄像头在不在: 读 PID(0x0A), 正常值是 0x76 ----
+	   读得到 = SCCB 通了(接线/供电/上拉都没问题); 读不到就置 0,
+	   上层看到就不去抓帧了。 */
+	s_cam_ok = (OV7670_ReadReg(0x0A) == 0x76U) ? 1U : 0U;
+}
+
+uint8_t OV7670_IsPresent(void)
+{
+	return s_cam_ok;
 }
 
 /* ======================= FIFO 读一个字节 ======================= */
-/* 手册: 数据在 RCK 上升沿输出, 同时读指针自增。所以每读一字节发一个上升沿 */
+/* 手册: 数据在 RCK 上升沿输出, 同时读指针自增。所以每读一字节发一个上升沿。
+ *
+ * ⚠⚠ 不要"优化"这个函数(比如把 FIFO_RCK_H/L 改成直接写 BSRR 省掉函数调用)!
+ *     AL422B 是 DRAM, 手册要求 WCK 和 RCK 里**较快的那个**充当内部刷新时钟,
+ *     而且必须一直跑。本设计里:
+ *       WCK = 摄像头的 PCLK = 12MHz, 一直在跑
+ *       RCK = 这里的 PE8       ≈ 5~8MHz(受编译器优化等级影响)
+ *     RCK 比 WCK 慢, 所以刷新由 WCK 承担 —— 这是安全的, 因为菜单和舵机界面
+ *     根本不读 FIFO, RCK 停着也没关系。
+ *     一旦把 RCK 提到 12MHz 以上, 刷新就改由 RCK 负责, 而它在我们不读的时候
+ *     是停的 —— **FIFO 里的数据会烂掉**, 而且现象很怪(菜单里待久了再进摄像头
+ *     界面, 头几帧是花的), 极难往这上面想。
+ *     -> 想让读取更快, 只能换 24MHz 晶振的模块, 不要动这里的时序。 */
 static inline uint8_t FIFO_ReadByte(void)
 {
 	uint8_t v;
@@ -362,29 +391,98 @@ static inline uint8_t FIFO_ReadByte(void)
 	return v;
 }
 
-/* ======================= 抓一帧进 FIFO ======================= */
-void OV7670_CaptureFrame(void)
+/* ======================= VSYNC 边沿等待(带超时) ======================= */
+/* 等 VSYNC 到达指定电平。返回 1 = 等到了, 0 = 超时。
+   ⚠ 超时不是可选项: 摄像头没接/没供电时 VSYNC 被下拉电阻拉成恒低,
+      裸 while 会死循环 —— 主循环整个卡死, LED 心跳停、按键全无反应,
+      看着就像板子挂了。而且 OV7670_Init() 的 SCCB 写对不存在的从机
+      也不报错, 所以一定会走到这里。 */
+static uint8_t VSYNC_Wait(BitAction level, uint32_t timeout_ms)
 {
-	/* 1. 等 VSYNC 的一个下降沿 = 一帧的开始, 这样抓到的帧边界是对齐的。
-	      不这么做的话读到的是 FIFO 里的随机位置, 画面会滚动/撕裂。 */
-	while (GPIO_ReadInputDataBit(CAM_VSYNC_PORT, CAM_VSYNC_PIN) != Bit_RESET) { }
-	while (GPIO_ReadInputDataBit(CAM_VSYNC_PORT, CAM_VSYNC_PIN) == Bit_RESET) { }
+	uint32_t t0 = Tick_GetMs();
 
-	/* 2. 复位写指针。⚠ 手册要求 WRST 在 WCK 上升沿被采样才生效,
-	      但 WCK 是摄像头给的(PCLK), MCU 碰不到 —— 好在复位后有足够时间 */
+	while (GPIO_ReadInputDataBit(CAM_VSYNC_PORT, CAM_VSYNC_PIN) != level)
+	{
+		if (Tick_Elapsed(t0, timeout_ms) != 0U) { return 0U; }
+	}
+	return 1U;
+}
+
+/* ======================= VSYNC 极性诊断 ======================= */
+/* 采样 VSYNC, 返回其中读到"高电平"的次数(共 OV7670_VSYNC_SAMPLES 次)。
+ *
+ * 为什么要这个东西:
+ *   抓帧的边沿顺序(先等下降沿=帧首, 再等上升沿=像素开始)完全建立在一个
+ *   前提上 —— **VSYNC 平时是高、帧首拉低**, 也就是 COM10(0x15) 的 bit1
+ *   "VSYNC 负有效"真的生效了。这一条只能上电实测, 看代码看不出来。
+ *   一帧 66.7ms 而同步脉冲很短, 所以只要采样点跨过一帧以上, 平时是高的话
+ *   返回值应该接近采样总数。
+ *
+ * 判读:
+ *   返回值 ≈ 总数(比如 9/10)  -> 极性对, 抓帧逻辑没问题
+ *   返回值 ≈ 0(比如 0/10)     -> 极性反了! 把 OV7670_CaptureFrame() 里
+ *                                前两步的 Bit_RESET / Bit_SET 对调
+ *   返回 0 且摄像头也没探测到  -> 摄像头没接好, 先查 SCL/SDA 接线
+ */
+uint8_t OV7670_VsyncIdleHigh(void)
+{
+	uint8_t i, n = 0U;
+
+	for (i = 0U; i < OV7670_VSYNC_SAMPLES; i++)
+	{
+		if (GPIO_ReadInputDataBit(CAM_VSYNC_PORT, CAM_VSYNC_PIN) != Bit_RESET) { n++; }
+		CAM_Delay_ms(15U);              /* 拉开间隔, 跨过一帧多才有意义 */
+	}
+	return n;
+}
+
+/* ======================= 抓一帧进 FIFO ======================= */
+/* 返回 1 = 抓到完整一帧; 0 = 超时(摄像头没接/没配好)。
+ *
+ * 为什么改成"由 VSYNC 边沿驱动"而不是"等固定毫秒数":
+ *   原来的写法是打开捕获后死等 40ms。但那个 40ms 是拿 CAM_Delay_ms() 数的,
+ *   而那个函数是 volatile 自减循环, "约 1ms" 是估的, 实测约 1.4~2.0ms ——
+ *   所以 40ms 其实是 55~75ms。偏偏模块晶振是 12MHz, QVGA 一帧要 66.7ms,
+ *   正好卡在临界点上: 抓够没抓够全看运气, 表现为画面**间歇性撕裂**。
+ *   改成等 VSYNC 边沿之后, 一帧就是一帧, 跟帧率是 15fps 还是 30fps 无关,
+ *   也不再依赖那个没标定过的延时函数。 */
+uint8_t OV7670_CaptureFrame(void)
+{
+	/* 1. 先确保不捕获 */
+	FIFO_WR_L();
+
+	/* 2. 等 VSYNC 下降沿 = 一帧的开始。
+	      COM10(0x15) 的 bit1 配成了"VSYNC 负有效", 所以 VSYNC 平时是高、
+	      帧首拉低 —— 下降沿正好是一帧的起点。 */
+	if (VSYNC_Wait(Bit_RESET, CAM_VSYNC_TIMEOUT_MS) == 0U) { return 0U; }
+
+	/* 3. 等它回到高 = 同步脉冲结束, 像素开始输出 */
+	if (VSYNC_Wait(Bit_SET, CAM_VSYNC_TIMEOUT_MS) == 0U) { return 0U; }
+
+	/* 4. 复位写指针。⚠ 手册要求 WRST 在 WCK 上升沿被采样才生效,
+	      而 WCK 是摄像头的 PCLK(12MHz, 83ns 一个周期) —— 这 10us 的脉冲
+	      横跨上百个 WCK 周期, 必然被采到。
+	      此步 FIFO_WR 还是低的, 所以复位期间不会有数据写进来。 */
 	FIFO_WRST_L();
 	CAM_Delay_us(10U);
 	FIFO_WRST_H();
 
-	/* 3. 打开捕获: 模块内部 FIFO_WE = NAND(FIFO_WR, HREF),
-	      所以之后每个 HREF 有效期间都会往 FIFO 里写 */
+	/* 5. 打开捕获。模块内部 FIFO_WE = NAND(FIFO_WR, HREF),
+	      所以之后只在 HREF 有效(有像素)的期间才真正往 FIFO 里写。 */
 	FIFO_WR_H();
 
-	/* 4. 等一帧写完。OV7670 在 QVGA 下约 30fps, 等 40ms 留余量 */
-	CAM_Delay_ms(40U);
-
-	/* 5. 停止捕获 */
+	/* 6. 等下一次 VSYNC 下降沿 = 一整帧刚好写完, 立刻停止捕获。
+	      超时值给得宽是为了"过等安全": 多写的那些落在第 153600 字节之后,
+	      我们根本读不到, 所以宁可多等; 反过来等不够才是致命的(会读到
+	      半帧 + 上一帧的残影)。 */
+	if (VSYNC_Wait(Bit_RESET, CAM_VSYNC_TIMEOUT_MS) == 0U)
+	{
+		FIFO_WR_L();
+		return 0U;
+	}
 	FIFO_WR_L();
+
+	return 1U;
 }
 
 /* ======================= 读出 + 抽点 + 旋转 ======================= */

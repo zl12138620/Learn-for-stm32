@@ -30,6 +30,18 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type: Debug or Release" FORCE)
 endif()
 
+# ---------- 4b. 给编辑器导出 compile_commands.json ----------
+# 少了它, VSCode 的 C/C++ 扩展只能靠 .vscode/c_cpp_properties.json 里那份
+# **手写的** includePath 去解析 #include —— 那个东西不会跟着 CMake 变,
+# 目录一搬家(比如 2026-09-22 按领域重组 SoftWare/)全部头文件就报
+# "基于 configurationProvider 检测到 #include 错误"。
+# 导出之后扩展直接读真实的编译命令, 以后改目录结构再也不用管它。
+#
+# 只在不是 MSVC 的场合设(传统上是给 clangd/C-C++ 扩展用的习惯写法)。
+if(NOT MSVC)
+  set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+endif()
+
 set(TARGET_NAME STM32F407VGT6)
 set(OUTPUT_DIR  ${CMAKE_BINARY_DIR}/output)
 set(LIB_ROOT    ${CMAKE_CURRENT_SOURCE_DIR}/STM32F4xx_DSP_StdPeriph_Lib_V1.9.0)
@@ -49,12 +61,16 @@ endif()
 add_compile_definitions(STM32F40_41xxx USE_STDPERIPH_DRIVER)
 
 # ---------- 7. 头文件搜索路径 ----------
-#  USER/SoftWare : 应用代码 (保留自身告警)
+#  USER : 入口 (main.c/main.h)
+#  SoftWare/<领域>/inc : 自己写的库, 按功能领域分目录 (2026-09-22 重组)
+#  依赖规则见 SoftWare/README.md —— 同层之间不互相依赖, 上层可依赖下层
 #  System/CMSIS/Driver : ST 库头 (作为 SYSTEM include，抑制库头内部固有宏重定义噪声)
-include_directories(
-  ${CMAKE_CURRENT_SOURCE_DIR}/USER
-  ${CMAKE_CURRENT_SOURCE_DIR}/SoftWare/inc
-)
+set(APP_DOMAINS system comms display camera motion app)
+
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/USER)
+foreach(domain ${APP_DOMAINS})
+  include_directories(${CMAKE_CURRENT_SOURCE_DIR}/SoftWare/${domain}/inc)
+endforeach()
 include_directories(SYSTEM
   ${CMAKE_CURRENT_SOURCE_DIR}/System
   ${LIB_ROOT}/Libraries/CMSIS/Include
@@ -64,8 +80,20 @@ include_directories(SYSTEM
 # ---------- 8. 源文件收集 ----------
 file(GLOB USER_SOURCES   ${CMAKE_CURRENT_SOURCE_DIR}/USER/*.c)
 file(GLOB SYSTEM_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/System/*.c)
-file(GLOB APP_SOURCES    ${CMAKE_CURRENT_SOURCE_DIR}/SoftWare/src/*.c)
 file(GLOB SPL_SOURCES    ${LIB_ROOT}/Libraries/STM32F4xx_StdPeriph_Driver/src/*.c)
+
+# SoftWare/ 下每个领域一个 src/ 目录, 挨个收。
+# 加新领域时只要往上面 APP_DOMAINS 里加个名字, 这里和 include 路径都会跟上。
+#
+# ⚠ 这里用的是不带 CONFIGURE_DEPENDS 的 file(GLOB): CMake 只在 configure
+#   阶段展开通配符。所以**新增/删除/改名了源文件之后, 必须重跑**
+#     cmake -S . -B build -G Ninja
+#   只 cmake --build 的话 Ninja 根本不知道有新文件, 会报 undefined reference。
+set(APP_SOURCES "")
+foreach(domain ${APP_DOMAINS})
+  file(GLOB domain_sources ${CMAKE_CURRENT_SOURCE_DIR}/SoftWare/${domain}/src/*.c)
+  list(APPEND APP_SOURCES ${domain_sources})
+endforeach()
 
 # STM32F407 (STM32F40_41xxx) 没有以下外设模块，排除以免编译报错
 # (DMA2D/LTDC/DSI/SAI/QSPI/SPDIFRX/FMC/FMPI2C/LPTIM/CEC/DFSDM)

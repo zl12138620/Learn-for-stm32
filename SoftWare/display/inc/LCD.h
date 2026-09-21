@@ -65,10 +65,19 @@ void LCD_DrawPoint(uint16_t x, uint16_t y, uint16_t color);
 void LCD_DrawRect(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                   uint16_t color, uint8_t filled);
 
-/* 文字: 用 OLED_Font.h 里那张 8x16 ASCII 字库(两个屏共用一张表) */
+/* 文字: 用 Font8x16.h 里那张 8x16 ASCII 字库 */
 void LCD_ShowChar(uint16_t x, uint16_t y, char ch, uint16_t fg, uint16_t bg);
 void LCD_ShowString(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t bg);
 void LCD_ShowInt(uint16_t x, uint16_t y, int32_t v, uint16_t fg, uint16_t bg);
+
+/* ---- 汉字 16x16(字模在 CN_Font.c, 由 工具/gen_cn_font.py 从 simhei.ttf 生成) ----
+   支持中英混排: 汉字按 16px 宽画, ASCII 按 8px 宽画。
+   字符串里出现字符集外的汉字时, 那一格会画成空白(宽度仍占 16px, 布局不错位)——
+   看到空格子说明该往脚本的 CHARS 里补字再重跑。
+   字符集外的 ASCII(如控制字符)交给 LCD_ShowChar 处理, 它会画成 '?'。 */
+uint16_t LCD_CNWidth(const char *s);                       /* 这段文字占多少像素宽 */
+uint16_t LCD_ShowCN(uint16_t x, uint16_t y, const char *s,
+                    uint16_t fg, uint16_t bg);             /* 返回画完后的 x */
 
 /* 自检: 画边框 + 三色块 + 一行字, 用来一眼判断初始化对不对 */
 void LCD_SelfTest(void);

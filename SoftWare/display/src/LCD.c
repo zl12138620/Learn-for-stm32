@@ -13,7 +13,8 @@
   */
 
 #include "LCD.h"
-#include "OLED_Font.h"      /* 复用那张 8x16 ASCII 字库 */
+#include "Font8x16.h"       /* 8x16 ASCII 字库 */
+#include "CN_Font.h"        /* 16x16 汉字字模(脚本从 simhei.ttf 生成) */
 
 /* ======================= 引脚配置 ======================= */
 /* 改引脚时下面这些一起改 */
@@ -514,7 +515,7 @@ void LCD_ShowChar(uint16_t x, uint16_t y, char ch, uint16_t fg, uint16_t bg)
 	{
 		for (col = 0U; col < 8U; col++)
 		{
-			uint8_t  b = OLED_F8x16[idx][(row < 8U) ? col : (uint8_t)(col + 8U)];
+			uint8_t  b = Font8x16[idx][(row < 8U) ? col : (uint8_t)(col + 8U)];
 			uint16_t c = ((b & (uint8_t)(0x01U << (row & 7U))) != 0U) ? fg : bg;
 			SPI_WriteHalf(c);           /* 16 位模式下一次写一个像素 */
 		}
@@ -532,6 +533,118 @@ void LCD_ShowString(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t
 		if ((uint32_t)x + 8U > LCD_W) { break; }    /* 到右边就停, 不绕行 */
 		s++;
 	}
+}
+
+/* ======================= 汉字 (16x16) ======================= */
+/* 字模在 CN_Font.c(由 工具/gen_cn_font.py 从 simhei.ttf 生成)。
+   与上面那张 8x16 ASCII 字库的存储方式**不一样**, 别混:
+     - ASCII 字库(Font8x16): **按列**存, bit0 在最上面
+     - 汉字字模(CN_Font16)  : **按行**存, 每行 2 字节, 高位在左
+   混用会得到转置或翻转的乱码。 */
+
+/* 用 UTF-8 三字节编码在表里查下标; 找不到返回 -1 */
+static int16_t CN_Lookup(const char *u)
+{
+	uint8_t i;
+
+	for (i = 0U; i < CN_FONT_COUNT; i++)
+	{
+		if ((CN_Glyphs[i].utf8[0] == (uint8_t)u[0]) &&
+		    (CN_Glyphs[i].utf8[1] == (uint8_t)u[1]) &&
+		    (CN_Glyphs[i].utf8[2] == (uint8_t)u[2]))
+		{
+			return (int16_t)i;
+		}
+	}
+	return -1;
+}
+
+/* 跳过当前字符, 返回它占几个字节 + 占几像素宽(放进 *px_w)。
+   只认两种: 1 字节 ASCII(8px) 和 3 字节汉字(16px)。 */
+static uint8_t CN_Step(const char *s, uint16_t *px_w)
+{
+	uint8_t b = (uint8_t)s[0];
+
+	if (b < 0x80U)                          /* ASCII */
+	{
+		*px_w = 8U;
+		return 1U;
+	}
+	if ((b & 0xF0U) == 0xE0U)               /* 三字节 UTF-8 = 汉字 */
+	{
+		*px_w = CN_FONT_W;
+		return 3U;
+	}
+
+	/* 其它编码(不该出现): 按 8px 当 ASCII 处理 —— 宽度必须和
+	   下面实际画的 LCD_ShowChar(它会把非法字符画成 '?')对得上,
+	   否则光标会越走越偏, 整行错位。 */
+	*px_w = 8U;
+	return 1U;
+}
+
+uint16_t LCD_CNWidth(const char *s)
+{
+	uint16_t w = 0U;
+	uint16_t one;
+
+	while (*s != '\0')
+	{
+		s += CN_Step(s, &one);
+		w = (uint16_t)(w + one);
+	}
+	return w;
+}
+
+/* 画一串"中文为主、可混 ASCII"的文字, 返回画完之后的 x(方便接着往后画)。
+   示例: LCD_ShowCN(20, 48, "角度", LCD_WHITE, LCD_BLACK);
+         LCD_ShowCN(20, 48, "FPS:20", LCD_WHITE, LCD_BLACK);   // 全 ASCII 也行 */
+uint16_t LCD_ShowCN(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t bg)
+{
+	while (*s != '\0')
+	{
+		uint16_t one;
+		uint8_t  nb = CN_Step(s, &one);
+
+		if ((uint32_t)x + one > LCD_W) { break; }   /* 到右边就停, 不绕行 */
+
+		if (nb == 1U)
+		{
+			LCD_ShowChar(x, y, *s, fg, bg);
+		}
+		else
+		{
+			int16_t  idx = CN_Lookup(s);
+			uint8_t  row, col;
+
+			/* 字模按行存, 每行 2 字节。第 row 行左半边 = [row*2],
+			   右半边 = [row*2+1]; 每字节高位在左。 */
+			LCD_PixelWriteBegin(x, y, CN_FONT_W, CN_FONT_H);
+
+			for (row = 0U; row < CN_FONT_H; row++)
+			{
+				uint8_t hi = (idx >= 0) ? CN_Font16[idx][row * 2U]      : 0U;
+				uint8_t lo = (idx >= 0) ? CN_Font16[idx][row * 2U + 1U] : 0U;
+
+				for (col = 0U; col < CN_FONT_W; col++)
+				{
+					uint8_t  bit = (col < 8U) ? (uint8_t)(hi >> (7U - col))
+					                          : (uint8_t)(lo >> (7U - (col - 8U)));
+					uint16_t c   = ((bit & 0x01U) != 0U) ? fg : bg;
+					SPI_WriteHalf(c);
+				}
+			}
+
+			LCD_PixelWriteEnd();
+			/* 表里没有这个字: idx < 0, 整格按 bg 刷掉 —— 布局宽度仍然对得上,
+			   不会因为它找不到就整行错位。看到空白格子说明字符集要补字。 */
+		}
+
+		s += nb;
+		x = (uint16_t)(x + one);
+	}
+
+	return x;
 }
 
 void LCD_ShowInt(uint16_t x, uint16_t y, int32_t v, uint16_t fg, uint16_t bg)

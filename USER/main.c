@@ -1,167 +1,61 @@
+/**
+  ******************************************************************************
+  * @file    USER/main.c
+  * @brief   程序入口 —— 开机初始化清单 + 一个空转的超级循环
+  *
+  *          这个文件刻意保持得很短: **看它一眼就知道这块板子跑了些什么**。
+  *          具体的活都在 SoftWare/ 下按领域分好了:
+  *
+  *            system/   Tick(毫秒时基)  Led(心跳)  Ring_buffer(环形缓冲)
+  *            comms/    Usart(调试串口, 含接收中断)
+  *            display/  Lcd(ST7735S 屏)  Menu(三个界面的绘制)  字模
+  *            camera/   OV7670(带 FIFO 的摄像头)
+  *            motion/   Servo(SG90)  Encoder(旋转编码器)
+  *            app/      App(界面状态机 + 串口回显 + 开机横幅)
+  *
+  *          加新外设的流程: 新模块放进对应领域 -> 在下面初始化清单里加一行
+  *          -> 需要界面就在 app/App.c 的菜单里加一项。
+  ******************************************************************************
+  */
+
 #include "main.h"
-
-/* ============ USART1 接收环形缓冲(生产者: USART1_IRQHandler / 消费者: 主循环) ============ */
-/* 定义在 main.c, 对应 main.h 中的 extern 声明; 存储区 64 字节(环形缓冲实际最多缓存 63 字节) */
-RingBuf_t g_uart1_rx;
-uint8_t   g_uart1_rx_mem[UART1_RX_BUF_SIZE];
-
-/*串口引脚宏定义*/
-#define USART1_RCC_CLK  RCC_APB2Periph_USART1
-#define USART1_IO_CLK   RCC_AHB1Periph_GPIOA
-#define USART1_PORT     GPIOA
-#define USART1_TX_PIN   GPIO_Pin_9
-#define USART1_RX_PIN    GPIO_Pin_10
-
-/* LED2 挂在 PB2 上: 阳极接 PB2, 阴极经 R29 到 GND —— 高电平点亮。
-   主循环里让它慢速闪烁当"心跳": 灯在闪 = 固件活着且主循环在转。
-   它不依赖串口、不依赖屏幕, 所以哪天再出问题, 先看它。 */
-#define LED_PORT        GPIOB
-#define LED_PIN         GPIO_Pin_2
-
-static void LED_Conf(void);
-
-static void USART_Conf(uint32_t baudrate);
-static void USART_SendBytes(const uint8_t *data, uint32_t lenth);      /* 通用: 逐字节发送 */
-static void USART_SendCamId(void);                                     /* 摄像头开机自检, 打一行 */
 
 int main(void)
 {
-    LED_Conf();
+    /* ---- 1. 先把"能报信"的弄好 ----
+       串口和 LED 放在最前面: 后面任何一个外设初始化卡住, 至少还知道
+       固件跑到了哪一步。串口能出横幅、灯会闪, 排障就有抓手。 */
+    Led_Init();
+    Usart_Init(9600);
 
-    USART_Conf(9600);
-
-    /* 初始化接收环形缓冲 + 使能 USART1 接收非空中断(RXNE):
-       来一个字节自动存入 g_uart1_rx(见 System/stm32f4xx_it.c 的 USART1_IRQHandler) */
-    RingBuf_Init(&g_uart1_rx, g_uart1_rx_mem, sizeof(g_uart1_rx_mem));
-    USART_ITConfig(USART1, USART_IT_RXNE, ENABLE);
-    NVIC_EnableIRQ(USART1_IRQn);
-
-    /* ---- 1.8 寸 SPI TFT (ST7735S 128x160) ----
-       SCK=PB13  SDA=PB15  CS=PB12  A0=PB10  RESET=PB11, 背光接 3.3V */
+    /* ---- 2. 屏幕 ----
+       1.8 寸 SPI TFT (ST7735S 128x160):
+         SCK=PB13  SDA=PB15  CS=PB12  A0=PB10  RESET=PB11  (硬件 SPI2 + DMA) */
     LCD_Init();
-    LCD_SelfTest();                 /* 边框 + 三色块 + 三行字: 换屏/换线后一眼验证 */
 
-    /* ---- OV7670 摄像头(带 FIFO) ---- */
-    OV7670_Init();
-    USART_SendCamId();              /* 开机报一次摄像头 ID, 见函数里的说明 */
+    /* ---- 3. 外设 ----
+       ⚠ 顺序有讲究: **Tick_Init() 必须放最后** —— 它一开 SysTick 中断,
+         Encoder_SwTick1ms() 马上就开始被调了, 所以必须等 Encoder_Init()
+         把 PB5/PB6/PB7 配好之后再启动。 */
+    OV7670_Init();      /* PE0~PE15 + PB0/PB1, 内部要等约 200ms */
+    Servo_Init();       /* PA1 + TIM5_CH2, 上电回中位 90° */
+    Encoder_Init();     /* A=PB6 B=PB5 SW=PB7 + EXTI6 + TIM7 消抖 */
+    Tick_Init();        /* SysTick 1ms: 按键采样 + 帧率统计 + 心跳计时 */
 
-    uint16_t hb = 0U;               /* 心跳计数 */
+    /* ---- 4. 应用层 ----
+       打开机横幅 + 画主菜单。必须在 Usart / LCD / OV7670 / Tick 都就绪之后。 */
+    App_Init();
+
+    /* ======================= 主循环 =======================
+       就两件事, 顺序不能换:
+         App_Run()       内部是"串口回显 -> 取按键(可能切屏) -> 按界面干活"
+         Led_Heartbeat() 主循环还活着就翻灯
+
+       ⚠ 心跳必须留在主循环里, 不要挪进中断 —— 主循环一旦卡住灯就停,
+         这正是它当故障指示的意义。挪进中断的话主循环死锁灯也照闪。 */
     while (1)
     {
-        uint8_t ch;
-
-        /* 先把串口攒下的字节回显掉(不阻塞, 有多少发多少) */
-        while (RingBuf_ReadByte(&g_uart1_rx, &ch))
-        {
-            USART_SendBytes(&ch, 1U);
-        }
-
-        /* ---- 抓一帧 -> 读出+旋转 -> DMA 送屏 ----
-           抓帧要等 VSYNC 对齐, 所以这一轮大约 50ms(约 20fps) */
-        OV7670_CaptureFrame();
-        OV7670_ReadFrameRotated();
-        LCD_DrawImage(4U, 0U, CAM_ROT_W, CAM_ROT_H, OV7670_GetFrameBuf());
-
-        /* 心跳: 约每 10 帧(半秒)翻转一次 LED2 */
-        if (++hb >= 10U)
-        {
-            hb = 0U;
-            GPIO_WriteBit(LED_PORT, LED_PIN,
-                          (GPIO_ReadOutputDataBit(LED_PORT, LED_PIN) == Bit_SET) ? Bit_RESET
-                                                                                 : Bit_SET);
-        }
+        App_Run();
+        Led_Heartbeat();
     }
-}
-
-/* 开机读一次 OV7670 的 PID(0x0A)/VER(0x0B), 正常值应是 0x76 / 0x73。
-   **这是接好线之后第一个该看的东西**: 读得到 -> SCCB 通了(接线/供电/上拉都没问题),
-   后面出问题就都在 FIFO 那边; 读不到 -> 先查 SIO_C / SIO_D。
-   摄像头调通之后这一整段可以删掉。 */
-static void USART_SendCamId(void)
-{
-    static const char HEXD[] = "0123456789ABCDEF";
-    static const char OK[]   = "CAM OK   PID=0x";
-    static const char BAD[]  = "CAM FAIL PID=0x";
-    uint8_t  pid = OV7670_ReadReg(0x0A);
-    uint8_t  ver = OV7670_ReadReg(0x0B);
-    const char *p = (pid == 0x76U) ? OK : BAD;
-    uint8_t  buf[32];
-    uint8_t  n = 0U;
-
-    while (*p != '\0') { buf[n++] = (uint8_t)(*p++); }
-
-    buf[n++] = (uint8_t)HEXD[(pid >> 4) & 0x0FU];
-    buf[n++] = (uint8_t)HEXD[pid & 0x0FU];
-    buf[n++] = (uint8_t)' ';
-    buf[n++] = (uint8_t)'V';
-    buf[n++] = (uint8_t)'R';
-    buf[n++] = (uint8_t)'=';
-    buf[n++] = (uint8_t)'0';
-    buf[n++] = (uint8_t)'x';
-    buf[n++] = (uint8_t)HEXD[(ver >> 4) & 0x0FU];
-    buf[n++] = (uint8_t)HEXD[ver & 0x0FU];
-    buf[n++] = (uint8_t)'\r';
-    buf[n++] = (uint8_t)'\n';
-
-    USART_SendBytes(buf, n);
-}
-
-static void USART_IO_Conf(void)//串口IO初始化
-{
-    RCC_AHB1PeriphClockCmd(USART1_IO_CLK, ENABLE);
-    GPIO_InitTypeDef GPIO_InitStruct;
-
-    GPIO_StructInit(&GPIO_InitStruct);
-    GPIO_InitStruct.GPIO_Mode = GPIO_Mode_AF;
-    GPIO_InitStruct.GPIO_OType = GPIO_OType_PP;
-    GPIO_InitStruct.GPIO_Pin = USART1_TX_PIN | USART1_RX_PIN;
-    GPIO_InitStruct.GPIO_PuPd = GPIO_PuPd_UP;
-    GPIO_InitStruct.GPIO_Speed = GPIO_Speed_100MHz;
-    GPIO_Init(USART1_PORT, &GPIO_InitStruct);
-}
-
-static void USART_Conf(uint32_t baudrate)
-{
-    USART_IO_Conf();
-    RCC_APB2PeriphClockCmd(USART1_RCC_CLK, ENABLE);
-    GPIO_PinAFConfig(USART1_PORT, GPIO_PinSource9, GPIO_AF_USART1);
-    GPIO_PinAFConfig(USART1_PORT, GPIO_PinSource10, GPIO_AF_USART1);
-
-    USART_InitTypeDef USART_InitStruct;
-    USART_InitStruct.USART_BaudRate = baudrate;
-    USART_InitStruct.USART_HardwareFlowControl = USART_HardwareFlowControl_None;
-    USART_InitStruct.USART_Mode = USART_Mode_Rx | USART_Mode_Tx;
-    USART_InitStruct.USART_Parity = USART_Parity_No;
-    USART_InitStruct.USART_StopBits = USART_StopBits_1;
-    USART_InitStruct.USART_WordLength = USART_WordLength_8b;
-    USART_Init(USART1, &USART_InitStruct);
-    USART_Cmd(USART1, ENABLE);
-}
-
-static void USART_SendBytes(const uint8_t *data, uint32_t lenth)
-{
-    for(uint32_t i = 0; i < lenth; i++)
-    {
-        while (USART_GetFlagStatus(USART1, USART_FLAG_TXE) == RESET);  /* 等 DR 空再写, 避免覆盖上一字节 */
-        USART_SendData(USART1, data[i]);
-    }
-    while (USART_GetFlagStatus(USART1, USART_FLAG_TC) == RESET);       /* 等最后一个字节完全发完 */
-}
-
-/* ======================= LED: 心跳指示 ======================= */
-static void LED_Conf(void)
-{
-    GPIO_InitTypeDef g;
-
-    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE);
-
-    GPIO_StructInit(&g);
-    g.GPIO_Pin   = LED_PIN;
-    g.GPIO_Mode  = GPIO_Mode_OUT;
-    g.GPIO_OType = GPIO_OType_PP;
-    g.GPIO_PuPd  = GPIO_PuPd_NOPULL;
-    g.GPIO_Speed = GPIO_Speed_2MHz;
-    GPIO_Init(LED_PORT, &g);
-
-    GPIO_ResetBits(LED_PORT, LED_PIN);      /* 先灭 */
 }

@@ -5,7 +5,15 @@ build-*/
 # 临时日志
 *.log
 
+# Python
+# 通用忽略 *.py, 但下面这个例外必须留着:
+# 它是生成 SoftWare/display/src/CN_Font.c 的脚本 —— 那张字模表是**生成物**,
+# 生成器不进仓库的话, 以后想加个字都没法重新生成, 只能照着重写一遍。
 *.py
+!工具/gen_cn_font.py
+__pycache__/
+*.pyc
+
 # 本地资料与可重新下载的工具包(不纳入仓库)
 资料/
 tools/*.vsix

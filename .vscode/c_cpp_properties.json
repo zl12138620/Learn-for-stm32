@@ -1,11 +1,30 @@
 {
+  // 这份配置是给 VSCode 的 C/C++ 扩展**解析 #include 用的**, 和实际编译无关
+  // (实际编译走 CMakeLists.txt, 那边才是权威)。
+  //
+  // ⚠ 2026-09-22: 之前这里写死了 ${workspaceFolder}/SoftWare/inc, 而那天
+  //    SoftWare/ 按功能领域重组成 6 个子目录, 于是所有自己写的模块都报
+  //    "基于 configurationProvider 检测到 #include 错误"。
+  //    **编译一直是好的** —— 只有编辑器在报错。
+  //
+  // 现在主用 compileCommands(CMake 导出的真实编译命令, 永远和构建一致),
+  // 下面的 includePath 只作兜底。改目录结构后如果还报错, 先跑一次
+  //   cmake -S . -B build -G Ninja
+  // 然后命令面板执行 "C/C++: Reset IntelliSense Database"。
   "configurations": [
     {
       "name": "STM32F407VGT6 (GCC)",
+      "compileCommands": "${workspaceFolder}/build/compile_commands.json",
       "includePath": [
         "${workspaceFolder}/USER",
         "${workspaceFolder}/System",
-        "${workspaceFolder}/SoftWare/inc",
+        // SoftWare/ 按功能领域分目录, 每个领域一个 inc/ (规则见 SoftWare/README.md)
+        "${workspaceFolder}/SoftWare/system/inc",
+        "${workspaceFolder}/SoftWare/comms/inc",
+        "${workspaceFolder}/SoftWare/display/inc",
+        "${workspaceFolder}/SoftWare/camera/inc",
+        "${workspaceFolder}/SoftWare/motion/inc",
+        "${workspaceFolder}/SoftWare/app/inc",
         "${workspaceFolder}/STM32F4xx_DSP_StdPeriph_Lib_V1.9.0/Libraries/CMSIS/Include",
         "${workspaceFolder}/STM32F4xx_DSP_StdPeriph_Lib_V1.9.0/Libraries/STM32F4xx_StdPeriph_Driver/inc"
       ],

@@ -60,8 +60,28 @@
 #define CAM_ROT_W   120U    /* 再转 90°, 正好铺满 128x160 的屏 */
 #define CAM_ROT_H   160U
 
+/* 等 VSYNC 边沿的超时毫秒数。12MHz 晶振下一帧 66.7ms, 给到 200 是为了
+   "过等安全" —— 多写的像素落在我们读不到的地方, 等不够才是致命的。 */
+#define CAM_VSYNC_TIMEOUT_MS    200U
+
 /* ============================ API ============================ */
 void      OV7670_Init(void);                /* GPIO + 复位 + SCCB 写寄存器表 */
+
+/* 摄像头在不在(OV7670_Init() 里读 PID 判断出来的)。
+   返回 0 时**不要去调 OV7670_CaptureFrame()** —— 省掉每帧几百毫秒的超时等待,
+   界面直接显示"无信号"就行。 */
+uint8_t   OV7670_IsPresent(void);
+
+/* ---- 诊断: VSYNC 平时是高还是低 ----
+   抓帧的边沿顺序建立在"VSYNC 平时高、帧首拉低"(COM10 的 VSYNC 负有效)这个
+   前提上, 而上电实测是唯一能验证它的办法。本函数采样 N 次(间隔跨过一帧多),
+   返回其中高电平的次数:
+     接近总数 -> 极性对, 抓帧逻辑没问题
+     接近 0   -> 极性反了, 把 OV7670_CaptureFrame() 前两步的
+                 Bit_RESET / Bit_SET 对调
+   摄像头没接好时也会返回 0, 配合 OV7670_IsPresent() 一起看。 */
+#define OV7670_VSYNC_SAMPLES    10U
+uint8_t   OV7670_VsyncIdleHigh(void);
 
 /* 读回一个寄存器。这是**接好线之后第一个该调的函数**:
    读 PID(0x0A)/VER(0x0B), 正常应回 0x76 / 0x73。
@@ -69,7 +89,12 @@ void      OV7670_Init(void);                /* GPIO + 复位 + SCCB 写寄存器
 uint8_t   OV7670_ReadReg(uint8_t reg);
 void      OV7670_WriteReg(uint8_t reg, uint8_t val);
 
-void      OV7670_CaptureFrame(void);        /* 对齐帧边界 -> 抓一帧进 FIFO */
+/* 对齐帧边界 -> 抓一帧进 FIFO。
+   返回 1 = 抓到完整一帧; 0 = 超时(摄像头没接/没配好)。
+   ⚠ 返回 0 时**不要**再去调 OV7670_ReadFrameRotated(),
+     否则读出来的是 FIFO 里的陈旧内容(上一帧的残影)。 */
+uint8_t   OV7670_CaptureFrame(void);
+
 void      OV7670_ReadFrameRotated(void);    /* 读出 + 抽点 + 旋转, 存进帧缓冲 */
 uint16_t *OV7670_GetFrameBuf(void);         /* 帧缓冲, 尺寸 CAM_ROT_W x CAM_ROT_H */
 
