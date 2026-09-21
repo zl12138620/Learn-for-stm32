@@ -39,6 +39,17 @@ motion/   ->  system
 app/      ->  camera  comms  display  motion  system
 ```
 
+**⚠ 唯一的例外：`FreeRTOS-Kernel/`**
+
+2026-09-22 移植 FreeRTOS 之后，`system/`（Tick）、`motion/`（Encoder 的临界区）、
+`display/`（Menu 的 LCD 互斥量）、`app/` 都会 include FreeRTOS 的头。
+
+这**不算破坏分层**：FreeRTOS 是第三方库，不是本工程的领域，规则管的是
+"领域之间"的关系。上面那张表里领域之间的依赖**一条都没变**。
+
+代价是这几个领域不再能"整块搬到没有 FreeRTOS 的工程" —— 真要搬得把
+用到的 RTOS 原语换掉（临界区、互斥量、任务通知各一处，量不大）。
+
 自查命令：
 
 ```bash

@@ -59,12 +59,17 @@ void Menu_DrawServoValue(uint8_t deg);        /* 角度数字 + 进度条填充(
 /* ---------- 摄像头界面 ---------- */
 void Menu_DrawCameraChrome(void);             /* 清屏 + 帧率占位(进入时调) */
 
-/* 画面 + 帧率。⚠ **不加锁**, 调用方自己加 —— 而且判断也要在锁里:
+/* 画面 + 帧率。w/h 是**摄像头输出**的尺寸(OV7670.h 的 CAM_ROT_W/H),
+   位置由本模块的布局决定。
+   ⚠ **不加锁**, 调用方自己加 —— 而且判断也要在锁里:
        Menu_Lock();
-       if (s_screen == UI_CAMERA) { Menu_DrawCameraFrameLocked(buf, fps); }
+       if (s_screen == UI_CAMERA) {
+           Menu_DrawCameraFrameLocked(buf, CAM_ROT_W, CAM_ROT_H, fps);
+       }
        Menu_Unlock();
-   为什么非要这样, Menu.c 里这个函数的注释写清楚了(界面切换的竞争)。 */
-void Menu_DrawCameraFrameLocked(const uint16_t *buf, uint8_t fps);
+   为什么非要这样, 见 Menu.c 里这个函数的注释(界面切换的竞争)。 */
+void Menu_DrawCameraFrameLocked(const uint16_t *buf, uint16_t w, uint16_t h,
+                                uint8_t fps);
 
 void Menu_DrawCameraNoSignal(void);           /* 摄像头没接好时的提示 */
 

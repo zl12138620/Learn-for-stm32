@@ -41,8 +41,12 @@
    LedTask(1) 一起饿死。这是任务拆分里最容易踩的一脚。 */
 #define UI_POLL_MS          5U
 
-/* UiTask 超过这么久没动静就认定它卡住了, LedTask 转成快闪报警 */
-#define UI_ALIVE_TIMEOUT_MS 1000U
+/* UiTask 超过这么久没动静就认定它卡住了, LedTask 转成快闪报警。
+   ⚠ 给到 2 秒而不是 1 秒, 是为了躲开一个**误报**: UiTask 里的串口回显是
+     阻塞发送的(9600 下 1.04ms/字节), 往串口猛灌数据时它会一次卡住好几百
+     毫秒 —— 那是正常的, 不该当成故障。真要看回显阻塞的问题, 得把
+     发送改成中断/流缓冲, 不是靠调这个阈值。 */
+#define UI_ALIVE_TIMEOUT_MS 2000U
 
 static void UiTask(void *arg);
 static void CameraTask(void *arg);
@@ -208,7 +212,9 @@ static void CameraTask(void *arg)
         Menu_Lock();
         if (s_screen == UI_CAMERA)
         {
-            Menu_DrawCameraFrameLocked(OV7670_GetFrameBuf(), s_fps);
+            Menu_DrawCameraFrameLocked(OV7670_GetFrameBuf(),
+                                       (uint16_t)CAM_ROT_W, (uint16_t)CAM_ROT_H,
+                                       s_fps);
         }
         Menu_Unlock();
     }

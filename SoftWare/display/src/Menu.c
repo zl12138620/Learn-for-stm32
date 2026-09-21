@@ -386,9 +386,13 @@ void Menu_DrawCameraChrome(void)
  *       菜单随后盖上去 -> **菜单赢** ✓
  *     · UiTask 先拿到锁 -> CameraTask 等到锁时 s_screen 已经是 MENU -> 直接跳过 ✓
  */
-void Menu_DrawCameraFrameLocked(const uint16_t *buf, uint8_t fps)
+void Menu_DrawCameraFrameLocked(const uint16_t *buf, uint16_t w, uint16_t h,
+                                uint8_t fps)
 {
-    LCD_DrawImage(CAM_IMG_X, 0U, 120U, 160U, buf);
+    /* 尺寸由调用方给 —— 那是**摄像头**输出的大小(OV7670.h 的 CAM_ROT_W/H),
+       不该写死在显示模块里, 否则哪天改分辨率这里会静默画错。
+       位置(CAM_IMG_X / 0)才是本模块的布局决定, 留在这儿。 */
+    LCD_DrawImage(CAM_IMG_X, 0U, w, h, buf);
     Menu_CameraFpsDraw(fps);
 }
 
