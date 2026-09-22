@@ -6,7 +6,7 @@
 
 ## 目录
 
-每个领域都是 `inc/` + `src/` 两层，共 6 个领域：
+每个领域都是 `inc/` + `src/` 两层，共 7 个领域：
 
 | 领域 | 管什么 | 模块 |
 |---|---|---|
@@ -15,7 +15,13 @@
 | `display/` | 屏幕上的一切 | `LCD`(ST7735S 驱动) `Menu`(三个界面的绘制) `Font8x16` `CN_Font` |
 | `camera/` | 摄像头 | `OV7670`(带 AL422B FIFO 的模块) |
 | `motion/` | 会动的东西 | `Servo`(SG90) `Encoder`(旋转编码器) |
+| `ui/` | LVGL 那一套 | `lv_conf.h`(配置) `Lvgl_Port`(时基/显示/输入对接) `Lvgl_Demo`(验证用演示页) |
 | `app/` | 应用逻辑 + 胶水 | `App`(界面状态机、串口回显、开机横幅) |
+
+⚠ `ui/` 和 `display/` **不是一回事**，两套并存：
+`display/` 是手写的 ST7735S 驱动 + 菜单绘制（当前菜单在用）；
+`ui/` 是 LVGL 的对接层（2026-09-22 引入，目前只有开机演示页）。
+LVGL 的 flush 回调复用 `display/` 的 `LCD_DrawImage`，所以是 `ui/ -> display`，单向。
 
 `USER/main.c` 在 `SoftWare/` 外面 —— 它只是入口：一份初始化清单 + 一个
 两行的主循环，**看一眼就知道这块板子跑了些什么**。
@@ -36,7 +42,8 @@ comms/    ->  system
 display/  ->  （无）
 camera/   ->  system
 motion/   ->  system
-app/      ->  camera  comms  display  motion  system
+ui/       ->  comms  display  motion  system
+app/      ->  camera  comms  display  motion  system  ui
 ```
 
 **⚠ 唯一的例外：`FreeRTOS-Kernel/`**
@@ -53,10 +60,10 @@ app/      ->  camera  comms  display  motion  system
 自查命令：
 
 ```bash
-for d in system comms display camera motion app; do
+for d in system comms display camera motion ui app; do
   deps=$(grep -rho '#include "[A-Za-z0-9_]*\.h"' SoftWare/$d/ | sed 's/#include "//;s/"//' | sort -u)
   out=""
-  for h in $deps; do for d2 in system comms display camera motion app; do
+  for h in $deps; do for d2 in system comms display camera motion ui app; do
       if [ -f "SoftWare/$d2/inc/$h" ] && [ "$d2" != "$d" ]; then out="$out $d2"; fi
   done; done
   printf "%-9s -> %s\n" "$d/" "$(echo $out | tr ' ' '\n' | sort -u | tr '\n' ' ')"

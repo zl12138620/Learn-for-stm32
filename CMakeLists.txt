@@ -65,7 +65,9 @@ add_compile_definitions(STM32F40_41xxx USE_STDPERIPH_DRIVER)
 #  SoftWare/<领域>/inc : 自己写的库, 按功能领域分目录 (2026-09-22 重组)
 #  依赖规则见 SoftWare/README.md —— 同层之间不互相依赖, 上层可依赖下层
 #  System/CMSIS/Driver : ST 库头 (作为 SYSTEM include，抑制库头内部固有宏重定义噪声)
-set(APP_DOMAINS system comms display camera motion app)
+#
+#  ui 放在 display 之后、app 之前: 它用 LCD/Tick, 自己又被 app 用。
+set(APP_DOMAINS system comms display camera motion ui app)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/USER)
 foreach(domain ${APP_DOMAINS})
@@ -78,6 +80,18 @@ endforeach()
 include_directories(SYSTEM
   ${CMAKE_CURRENT_SOURCE_DIR}/FreeRTOS-Kernel/include
   ${CMAKE_CURRENT_SOURCE_DIR}/FreeRTOS-Kernel/portable/GCC/ARM_CM4F
+)
+
+# LVGL 内核头(第三方, v9.6.0), 同样放 SYSTEM 里。
+#
+# ⚠ 只需要**根目录**这一个路径。v9.6 的头文件布局是这样:
+#     LVGL/lvgl.h          -> #include "include/lvgl/lvgl.h"
+#     LVGL/include/lvgl/**    内部彼此全是相对包含("core/lv_obj.h")
+#     LVGL/src/**.c           包含 "../include/lvgl/lvgl.h" 也是相对路径
+#   也就是说只要进得了 LVGL/ 的根, 剩下的 LVGL 自己全用相对路径走通了。
+#   本工程代码因此直接写 #include "lvgl.h" 就行。
+include_directories(SYSTEM
+  ${CMAKE_CURRENT_SOURCE_DIR}/LVGL
 )
 
 include_directories(SYSTEM
@@ -115,6 +129,37 @@ list(APPEND FREERTOS_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/FreeRTOS-Kernel/portable/MemMang/heap_4.c
 )
 
+# LVGL 内核源码(第三方, v9.6.0), 483 个 .c。
+#
+# ⚠ 这里敢用 GLOB_RECURSE 一次全收, 是因为两件事:
+#     1. 关掉的控件/驱动**不需要手工排除** —— LVGL 每个 .c 内部自己就有
+#        #if LV_USE_XXX 守卫, 没开的编出来是个空文件(比如 lv_button.c
+#        整个被 #if LV_USE_BUTTON 包着)。
+#     2. 真正没用到的代码由链接期的 --gc-sections 丢掉(见第 12 节的链接选项)。
+#   所以"收多了"的代价只是**编译时间**, 不是 flash 占用。
+#
+# ⚠ 只收 *.c。src/draw/sw/blend/helium/ 下那个 lv_blend_helium.S 是
+#   Helium 汇编, 归 LV_USE_NATIVE_HELIUM_ASM 管(关着的), 且不在通配范围内。
+file(GLOB_RECURSE LVGL_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/LVGL/src/*.c)
+
+# LVGL 的配置入口。lv_conf_internal.h 见到这个宏就 #include "lv_conf.h",
+# 并且是**走 include 路径**去找 —— 我们的配置放在 SoftWare/ui/inc/(已经
+# 因为 APP_DOMAINS 里的 ui 进了搜索路径), 而不是官方默认的
+# "lv_conf.h 摆在 lvgl 文件夹旁边"。详见 SoftWare/ui/inc/lv_conf.h 开头。
+add_compile_definitions(LV_CONF_INCLUDE_SIMPLE)
+
+# lv_font_conv 生成的字体文件里带这么一段:
+#     #ifdef LV_LVGL_H_INCLUDE_SIMPLE
+#     #include "lvgl.h"
+#     #else
+#     #include "lvgl/lvgl.h"      <-- 需要 LVGL/include 也在搜索路径上
+#     #endif
+# 不定义这个宏的话会走 else 分支去找 "lvgl/lvgl.h", 而那个路径我们**故意**没加
+# (见上面 include_directories 的注释: 进得了 LVGL/ 根目录, 剩下的 LVGL 自己
+#  全用相对路径走通了, 所以只需要一个路径)。
+# 定义它让生成的文件走 #include "lvgl.h", 复用同一个路径, 不用再加第二个。
+add_compile_definitions(LV_LVGL_H_INCLUDE_SIMPLE)
+
 # STM32F407 (STM32F40_41xxx) 没有以下外设模块，排除以免编译报错
 # (DMA2D/LTDC/DSI/SAI/QSPI/SPDIFRX/FMC/FMPI2C/LPTIM/CEC/DFSDM)
 list(FILTER SPL_SOURCES EXCLUDE REGEX
@@ -137,6 +182,7 @@ add_executable(${TARGET_NAME}.elf
   ${SYSTEM_SOURCES}
   ${APP_SOURCES}
   ${FREERTOS_SOURCES}
+  ${LVGL_SOURCES}
   ${SPL_SOURCES}
 )
 

@@ -93,6 +93,18 @@ int32_t  Encoder_ReadDelta(void);
    (采样和消抖由 Encoder_Init() 注册给 Tick 的 1ms 回调去做, 应用层不用管) */
 uint8_t  Encoder_SwTakePress(void);
 
+/* 读 SW 的**当前电平**(已经过 20ms 消抖): 1 = 正按着, 0 = 松着。
+   ⚠ 和上面那个是**两种东西**, 别拿错:
+        Encoder_SwTakePress() 是**边沿事件** —— 按一下只出现一次, 取走即清,
+                               适合"按一下切一个界面"这种一次性动作。
+        Encoder_SwIsDown()    是**电平**     —— 按住期间一直为 1,
+                               适合"按住不放要持续生效"的场合。
+     拿错的后果: 用 IsDown 判单击会变成按住就狂触发; 用 TakePress 判长按
+     则永远等不到第二次。
+   谁在用: LVGL 的 encoder 设备要的是电平(边沿由 LVGL 自己判), 所以给它这个;
+     而本工程原来那套菜单状态机用的是边沿, 保持 TakePress 不变。 */
+uint8_t  Encoder_SwIsDown(void);
+
 /* ---------- 底层计数(调试用) ---------- */
 uint32_t Encoder_GetCW(void);       /* 读正转累计次数 */
 uint32_t Encoder_GetCCW(void);      /* 读反转累计次数 */

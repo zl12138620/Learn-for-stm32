@@ -49,11 +49,14 @@
 #define configUSE_TIME_SLICING                  1           /* 同优先级轮转; 本工程没用到, 留着不碍事 */
 
 /* ============================ 内存 ============================ */
-/* heap_4, 16KB。当前静态 RAM 只用 39.2KB / 128KB, 绰绰有余。
+/* heap_4, 24KB。
+   2026-09-22 从 16KB 提到 24KB: 引入 LVGL 之后 UiTask 的栈需求大涨
+   (3KB 实测溢出, 见 App.c 里 UI_TASK_STACK 的说明)。
+   各任务栈加起来约 11.6KB, 24KB 留了 2 倍余量。
    真不够了会调到 vApplicationMallocFailedHook(), 不会悄悄失败。 */
 #define configSUPPORT_STATIC_ALLOCATION         0
 #define configSUPPORT_DYNAMIC_ALLOCATION        1
-#define configTOTAL_HEAP_SIZE                   (16 * 1024)
+#define configTOTAL_HEAP_SIZE                   (24 * 1024)
 #define configAPPLICATION_ALLOCATED_HEAP        0
 
 /* ============================ 同步原语 ============================ */

@@ -26,7 +26,9 @@
         "${workspaceFolder}/SoftWare/motion/inc",
         "${workspaceFolder}/SoftWare/app/inc",
         "${workspaceFolder}/STM32F4xx_DSP_StdPeriph_Lib_V1.9.0/Libraries/CMSIS/Include",
-        "${workspaceFolder}/STM32F4xx_DSP_StdPeriph_Lib_V1.9.0/Libraries/STM32F4xx_StdPeriph_Driver/inc"
+        "${workspaceFolder}/STM32F4xx_DSP_StdPeriph_Lib_V1.9.0/Libraries/STM32F4xx_StdPeriph_Driver/inc",
+        "${workspaceFolder}/LVGL/include",
+        "${workspaceFolder}/LVGL"
       ],
       "defines": [
         "STM32F40_41xxx",
